@@ -27,7 +27,11 @@ dotenv.config({ path: path.resolve(process.cwd(), ".env") });
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 const GUILD_ID = process.env.DISCORD_GUILD_ID;
-const APP_URL = (process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000").replace(/\/$/, "");
+const APP_URL = (
+  process.env.NEXT_PUBLIC_APP_URL ||
+  process.env.NEXT_PUBLIC_BASE_URL ||
+  "https://stexsecurity.vercel.app"
+).replace(/\/$/, "");
 
 // Supabase configuration
 const SUPABASE_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -110,6 +114,10 @@ client.once("ready", async () => {
   console.log(`Logged in as: ${client.user?.tag} (ID: ${client.user?.id})`);
   console.log(`Verification Gateway Base URL: ${APP_URL}`);
   console.log(`Target Guild ID: ${GUILD_ID || "Not set"}`);
+  console.log(`Environment: ${process.env.NODE_ENV || "production"}`);
+  console.log(`Supabase Host: ${SUPABASE_URL ? (() => { try { return new URL(SUPABASE_URL).hostname; } catch { return "configured"; } })() : "Not set"}`);
+  console.log(`Supabase Key Mode: ${SUPABASE_KEY ? (SUPABASE_KEY.startsWith("sb_") ? "Anon (Public)" : "Service Role (Privileged)") : "Missing"}`);
+  console.log(`Dual-Stack IPv4 / IPv6 Engine: ENABLED`);
   console.log(`====================================================`);
 
   // Register slash commands: /setup-verify, /blockip, /unblockip, /limit, /log

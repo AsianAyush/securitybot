@@ -178,3 +178,113 @@ export async function assignVerifiedRoles(params: {
 
   return { success: true };
 }
+
+/**
+ * Discord OAuth2 Configuration & Helpers
+ */
+
+export interface DiscordOAuthUser {
+  id: string;
+  username: string;
+  discriminator: string;
+  global_name?: string | null;
+  avatar: string | null;
+}
+
+/**
+ * Generates the Discord OAuth2 authorization URL with dynamic redirect_uri.
+ */
+export function getDiscordOAuthAuthorizeUrl(options: {
+  redirectUri: string;
+  clientId?: string;
+  state?: string;
+  scopes?: string[];
+}): string {
+  const clientId = options.clientId || process.env.DISCORD_CLIENT_ID;
+  if (!clientId) {
+    throw new Error("DISCORD_CLIENT_ID is not configured in environment variables.");
+  }
+
+  const scopes = options.scopes || ["identify", "guilds.members.read"];
+  const params = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: options.redirectUri,
+    response_type: "code",
+    scope: scopes.join(" "),
+    prompt: "consent",
+  });
+
+  if (options.state) {
+    params.set("state", options.state);
+  }
+
+  return `https://discord.com/oauth2/authorize?${params.toString()}`;
+}
+
+/**
+ * Exchanges a Discord OAuth2 authorization code for an access token.
+ */
+export async function exchangeDiscordOAuthCode(params: {
+  code: string;
+  redirectUri: string;
+  clientId?: string;
+  clientSecret?: string;
+}): Promise<{
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+  refresh_token: string;
+  scope: string;
+}> {
+  const clientId = params.clientId || process.env.DISCORD_CLIENT_ID;
+  const clientSecret = params.clientSecret || process.env.DISCORD_CLIENT_SECRET;
+
+  if (!clientId) {
+    throw new Error("DISCORD_CLIENT_ID is not configured.");
+  }
+  if (!clientSecret) {
+    throw new Error("DISCORD_CLIENT_SECRET is not configured.");
+  }
+
+  const body = new URLSearchParams({
+    client_id: clientId,
+    client_secret: clientSecret,
+    grant_type: "authorization_code",
+    code: params.code,
+    redirect_uri: params.redirectUri,
+  });
+
+  const res = await fetch(`${DISCORD_API_BASE}/oauth2/token`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: body.toString(),
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.text().catch(() => "");
+    throw new Error(`Failed to exchange OAuth code (HTTP ${res.status}): ${errorBody}`);
+  }
+
+  return await res.json();
+}
+
+/**
+ * Fetches the authenticated Discord user profile (@me) using an OAuth access token.
+ */
+export async function getDiscordOAuthUser(accessToken: string): Promise<DiscordOAuthUser> {
+  const res = await fetch(`${DISCORD_API_BASE}/users/@me`, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.text().catch(() => "");
+    throw new Error(`Failed to fetch Discord user (HTTP ${res.status}): ${errorBody}`);
+  }
+
+  return await res.json();
+}
+

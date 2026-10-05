@@ -36,6 +36,7 @@ type VerificationStatus = "idle" | "verifying" | "success" | "error";
 function VerifyContent() {
   const searchParams = useSearchParams();
   const rawDiscordId = searchParams.get("discord_id");
+  const rawError = searchParams.get("error");
 
   const [discordId, setDiscordId] = useState<string>("");
   const [member, setMember] = useState<MemberInfo | null>(null);
@@ -43,10 +44,10 @@ function VerifyContent() {
   const [isAlreadyVerified, setIsAlreadyVerified] = useState<boolean>(false);
   const [initialLoading, setInitialLoading] = useState<boolean>(true);
 
-  const [status, setStatus] = useState<VerificationStatus>("idle");
+  const [status, setStatus] = useState<VerificationStatus>(rawError ? "error" : "idle");
   const [activeStep, setActiveStep] = useState<number>(0);
-  const [errorMessage, setErrorMessage] = useState<string>("");
-  const [errorCode, setErrorCode] = useState<string>("");
+  const [errorMessage, setErrorMessage] = useState<string>(rawError ? decodeURIComponent(rawError) : "");
+  const [errorCode, setErrorCode] = useState<string>(rawError ? "OAUTH_ERROR" : "");
   const [errorDetails, setErrorDetails] = useState<Record<string, unknown> | null>(null);
 
   useEffect(() => {
@@ -168,17 +169,27 @@ function VerifyContent() {
             <div className="w-14 h-14 mx-auto mb-4 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
               <AlertTriangle className="w-7 h-7" />
             </div>
-            <h2 className="text-xl font-bold text-white mb-2">Missing Verification Link</h2>
+            <h2 className="text-xl font-bold text-white mb-2">Discord ID Required</h2>
             <p className="text-sm text-slate-300 mb-6 leading-relaxed">
-              No Discord identifier was detected. To verify your account, please return to Discord
-              and click the <strong>&ldquo;Verify&rdquo;</strong> button generated in your server&rsquo;s verification channel.
+              No Discord identifier was detected. To verify your account, click the <strong>&ldquo;Verify&rdquo;</strong> button generated in your server&rsquo;s verification channel, or authenticate directly via Discord OAuth.
             </p>
+
+            <div className="flex flex-col sm:flex-row gap-3 justify-center mb-6">
+              <a
+                href="/api/auth/discord"
+                className="inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-sm transition-all shadow-lg shadow-indigo-600/30 active:scale-95"
+              >
+                <ShieldCheck className="w-4 h-4" />
+                <span>Log In with Discord</span>
+              </a>
+            </div>
+
             <div className="bg-slate-900/60 rounded-xl p-4 border border-slate-800 text-left text-xs text-slate-400 space-y-2">
               <p className="font-semibold text-slate-300 flex items-center gap-1.5">
-                <Lock className="w-3.5 h-3.5 text-indigo-400" /> Expected URL Format:
+                <Lock className="w-3.5 h-3.5 text-indigo-400" /> Expected Gateway URL:
               </p>
               <code className="block bg-slate-950 px-3 py-2 rounded font-mono text-indigo-300 overflow-x-auto">
-                https://your-domain.com/verify?discord_id=YOUR_USER_ID
+                https://stexsecurity.vercel.app/verify?discord_id=YOUR_USER_ID
               </code>
             </div>
           </div>

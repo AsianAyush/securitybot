@@ -23,7 +23,7 @@ A high-performance, production-ready Discord verification web app and bot system
 [Discord Bot]
        │
        ▼ (Sends Ephemeral Message with unique link)
-https://verify.domain.com/verify?discord_id=<USER_SNOWFLAKE>
+https://stexsecurity.vercel.app/verify?discord_id=<USER_SNOWFLAKE>
        │
        ▼ (User opens browser gateway)
 [Next.js App Router Frontend]
@@ -89,8 +89,8 @@ cp .env.example .env.local
 
 Fill in the required variables:
 ```env
-# Web application URL
-NEXT_PUBLIC_APP_URL="http://localhost:3000"
+# Web application URL (Production default: https://stexsecurity.vercel.app)
+NEXT_PUBLIC_APP_URL="https://stexsecurity.vercel.app"
 
 # Supabase
 NEXT_PUBLIC_SUPABASE_URL="https://your-project.supabase.co"
