@@ -7,18 +7,102 @@ const IPV4_REGEX =
   /^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
 
 /**
- * Basic IPv6 validator
+ * Comprehensive IPv6 validator supporting:
+ * - Full notation: 2001:0db8:0000:0000:0000:0000:0000:0001
+ * - Compressed notation: 2001:db8::1
+ * - Loopback: ::1
+ * - IPv4-mapped: ::ffff:192.0.2.128
  */
 const IPV6_REGEX =
   /^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$|^(([0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4})?::(([0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4})?$/;
 
 /**
+ * Normalizes an IPv6 address to its canonical lowercase compressed form.
+ * Expands :: shorthand, strips leading zeroes, then re-compresses the longest
+ * run of consecutive all-zero groups with ::. This ensures consistent storage
+ * and comparison of IPv6 addresses regardless of the input format.
+ *
+ * @example
+ *   normalizeIpv6("2001:0DB8:0000:0000:0000:0000:0000:0001") => "2001:db8::1"
+ *   normalizeIpv6("::FFFF:192.168.1.1") => "::ffff:192.168.1.1"
+ */
+export function normalizeIpv6(raw: string): string {
+  if (!raw || typeof raw !== "string") return raw;
+
+  let ip = raw.trim().toLowerCase();
+
+  // Handle IPv4-mapped IPv6 (::ffff:x.x.x.x) — preserve the mapped form
+  const v4MappedMatch = ip.match(/^(::ffff:)(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i);
+  if (v4MappedMatch) {
+    return `::ffff:${v4MappedMatch[2]}`;
+  }
+
+  // Split on ::
+  const halves = ip.split("::");
+  if (halves.length > 2) return ip; // malformed
+
+  let groups: string[];
+
+  if (halves.length === 2) {
+    const left = halves[0] ? halves[0].split(":") : [];
+    const right = halves[1] ? halves[1].split(":") : [];
+    const missing = 8 - left.length - right.length;
+    const fill: string[] = Array(Math.max(0, missing)).fill("0");
+    groups = [...left, ...fill, ...right];
+  } else {
+    groups = ip.split(":");
+  }
+
+  if (groups.length !== 8) return ip; // malformed, return as-is
+
+  // Strip leading zeroes from each group
+  groups = groups.map((g) => {
+    const stripped = g.replace(/^0+/, "");
+    return stripped || "0";
+  });
+
+  // Re-compress: find the longest run of consecutive "0" groups
+  let bestStart = -1;
+  let bestLen = 0;
+  let curStart = -1;
+  let curLen = 0;
+
+  for (let i = 0; i < 8; i++) {
+    if (groups[i] === "0") {
+      if (curStart === -1) curStart = i;
+      curLen++;
+      if (curLen > bestLen) {
+        bestStart = curStart;
+        bestLen = curLen;
+      }
+    } else {
+      curStart = -1;
+      curLen = 0;
+    }
+  }
+
+  if (bestLen >= 2) {
+    const before = groups.slice(0, bestStart);
+    const after = groups.slice(bestStart + bestLen);
+    const compressed =
+      (before.length === 0 ? ":" : before.join(":")) +
+      ":" +
+      (after.length === 0 ? "" : after.join(":"));
+    return compressed;
+  }
+
+  return groups.join(":");
+}
+
+/**
  * Strips port numbers, quotes, brackets, and IPv4-mapped IPv6 prefixes if present.
+ * Also normalizes IPv6 addresses to canonical lowercase compressed form.
  * Examples:
  * - "192.168.1.1:54321" -> "192.168.1.1"
  * - "[2001:db8::1]:80" -> "2001:db8::1"
  * - "[2001:db8::1]" -> "2001:db8::1"
  * - "::ffff:192.168.1.1" -> "192.168.1.1"
+ * - "2001:0DB8:0000:0000:0000:0000:0000:0001" -> "2001:db8::1"
  */
 export function sanitizeIp(ip: string): string {
   if (!ip || typeof ip !== "string") return "";
@@ -46,6 +130,11 @@ export function sanitizeIp(ip: string): string {
     }
   }
 
+  // Normalize IPv6 to canonical compressed lowercase form
+  if (cleaned.includes(":") && !IPV4_REGEX.test(cleaned)) {
+    cleaned = normalizeIpv6(cleaned);
+  }
+
   return cleaned.trim();
 }
 
@@ -60,7 +149,7 @@ export function isValidIp(ip: string): boolean {
   // IPv4 simple regex
   if (IPV4_REGEX.test(trimmed)) return true;
 
-  // IPv6 check
+  // IPv6 check: loopback, compressed shorthand, or full notation
   return (
     (trimmed === "::1" || trimmed.includes("::") || IPV6_REGEX.test(trimmed)) &&
     trimmed.length <= 45
@@ -68,7 +157,7 @@ export function isValidIp(ip: string): boolean {
 }
 
 /**
- * Checks if the IP is localhost or a private RFC1918 range
+ * Checks if the IP is localhost or a private RFC1918 / RFC4193 / link-local range
  */
 export function isLocalOrPrivateIp(ip: string): boolean {
   const sanitized = sanitizeIp(ip);
@@ -79,6 +168,7 @@ export function isLocalOrPrivateIp(ip: string): boolean {
     sanitized.startsWith("10.") ||
     sanitized.startsWith("192.168.") ||
     sanitized.startsWith("fc00:") ||
+    sanitized.startsWith("fd") ||
     sanitized.startsWith("fe80:")
   ) {
     return true;
@@ -93,11 +183,13 @@ export function isLocalOrPrivateIp(ip: string): boolean {
 
 /**
  * Extracts the client's public IP address from standard reverse proxy and CDN headers.
+ * Fully supports both IPv4 and IPv6 addresses.
  * Order of priority:
  * 1. cf-connecting-ip (Cloudflare)
  * 2. x-real-ip (Standard proxies/Nginx)
  * 3. x-forwarded-for (Comma-separated list; grab the very first IP in the list and trim whitespace)
- * 4. Fallback to request.ip or a safe fallback string like '127.0.0.1' only if all headers are missing.
+ * 4. true-client-ip / fastly-client-ip / x-client-ip
+ * 5. Fallback to request.ip or a safe fallback string like '127.0.0.1' only if all headers are missing.
  */
 export function getClientIp(
   req:

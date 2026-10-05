@@ -78,6 +78,24 @@ export interface Database {
         };
         Relationships: [];
       };
+      guild_settings: {
+        Row: {
+          guild_id: string;
+          log_channel_id: string | null;
+          updated_at: string;
+        };
+        Insert: {
+          guild_id: string;
+          log_channel_id?: string | null;
+          updated_at?: string;
+        };
+        Update: {
+          guild_id?: string;
+          log_channel_id?: string | null;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
     };
     Views: {
       [_ in never]: never;
@@ -105,3 +123,7 @@ export type IpBlacklistUpdate = Database["public"]["Tables"]["ip_blacklist"]["Up
 export type IpLimitsRow = Database["public"]["Tables"]["ip_limits"]["Row"];
 export type IpLimitsInsert = Database["public"]["Tables"]["ip_limits"]["Insert"];
 export type IpLimitsUpdate = Database["public"]["Tables"]["ip_limits"]["Update"];
+
+export type GuildSettingsRow = Database["public"]["Tables"]["guild_settings"]["Row"];
+export type GuildSettingsInsert = Database["public"]["Tables"]["guild_settings"]["Insert"];
+export type GuildSettingsUpdate = Database["public"]["Tables"]["guild_settings"]["Update"];

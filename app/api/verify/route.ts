@@ -3,6 +3,7 @@ import { getClientIp, isValidIp } from "@/lib/ip";
 import { checkIpWithProxyCheck } from "@/lib/proxycheck";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { assignVerifiedRoles, getDiscordMember } from "@/lib/discord";
+import { sendAuditLog } from "@/lib/audit-log";
 
 export const dynamic = "force-dynamic";
 
@@ -10,101 +11,54 @@ interface VerificationRequestBody {
   discord_id?: string;
 }
 
-interface AuditWebhookParams {
+/**
+ * Resolves the guild ID from environment variables.
+ */
+function getGuildId(): string {
+  return process.env.DISCORD_GUILD_ID || "";
+}
+
+/**
+ * Builds a Discord avatar URL from member data or falls back to default.
+ */
+function buildAvatarUrl(discordId: string, avatar: string | null): string {
+  return avatar
+    ? `https://cdn.discordapp.com/avatars/${discordId}/${avatar}.png?size=128`
+    : `https://cdn.discordapp.com/embed/avatars/${parseInt(discordId) % 5}.png`;
+}
+
+/**
+ * Helper to fire an audit log for verification failures without blocking the response.
+ */
+async function logFailure(params: {
   discordId: string;
   username: string;
   avatarUrl?: string | null;
-  ip_address: string;
-  userIp?: string;
-  verifiedAt: Date;
-}
-
-/**
- * Calculates Discord account creation date from a snowflake ID.
- * Formula: (snowflake >> 22) + 1420070400000 ms
- */
-function getDiscordAccountCreatedAt(snowflake: string): { date: Date; timestampSec: number } {
-  try {
-    const snowflakeBigInt = BigInt(snowflake);
-    const timestampMs = Number((snowflakeBigInt >> 22n) + 1420070400000n);
-    const date = new Date(timestampMs);
-    return { date, timestampSec: Math.floor(timestampMs / 1000) };
-  } catch {
-    return { date: new Date(), timestampSec: Math.floor(Date.now() / 1000) };
-  }
-}
-
-/**
- * Sends a rich audit log embed to the configured Discord Webhook
- */
-async function sendAuditWebhook(params: AuditWebhookParams) {
-  const webhookUrl = process.env.DISCORD_LOG_WEBHOOK_URL;
-  if (!webhookUrl || webhookUrl.trim() === "" || webhookUrl === "your-discord-webhook-url-here") {
-    return;
-  }
-
-  const resolvedIp = (params.ip_address || params.userIp || "127.0.0.1").trim() || "127.0.0.1";
-  const { timestampSec: createdAtSec } = getDiscordAccountCreatedAt(params.discordId);
-  const verifiedSec = Math.floor(params.verifiedAt.getTime() / 1000);
-
-  const embed = {
-    title: "🛡️ SecuritySTEX Verification Audit Log",
-    color: 0x10b981, // Emerald Green
-    description: `A member has successfully passed all security barriers and completed server verification.`,
-    fields: [
-      {
-        name: "👤 Member",
-        value: `**${params.username}** (<@${params.discordId}>)`,
-        inline: true,
-      },
-      {
-        name: "🆔 Discord Snowflake ID",
-        value: `\`${params.discordId}\``,
-        inline: true,
-      },
-      {
-        name: "🌐 Plain-Text IP Address",
-        value: `\`${resolvedIp}\``,
-        inline: true,
-      },
-      {
-        name: "📅 Account Created",
-        value: `<t:${createdAtSec}:F> (<t:${createdAtSec}:R>)`,
-        inline: false,
-      },
-      {
-        name: "⏰ Verification Timestamp",
-        value: `<t:${verifiedSec}:F> (\`${params.verifiedAt.toISOString()}\`)`,
-        inline: false,
-      },
-    ],
-    thumbnail: params.avatarUrl ? { url: params.avatarUrl } : undefined,
-    footer: {
-      text: "SecuritySTEX • Plain-Text Audit Engine",
-    },
-    timestamp: params.verifiedAt.toISOString(),
-  };
+  ipAddress: string;
+  failureCode: string;
+  failureReason: string;
+  linkedAltDiscordId?: string | null;
+  linkedAltUsername?: string | null;
+}): Promise<void> {
+  const guildId = getGuildId();
+  if (!guildId) return;
 
   try {
-    const res = await fetch(webhookUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        username: "SecuritySTEX Audit Logger",
-        avatar_url: "https://cdn.discordapp.com/embed/avatars/0.png",
-        embeds: [embed],
-      }),
+    await sendAuditLog({
+      type: "failure",
+      guildId,
+      discordId: params.discordId,
+      username: params.username,
+      avatarUrl: params.avatarUrl,
+      ipAddress: params.ipAddress,
+      failureCode: params.failureCode,
+      failureReason: params.failureReason,
+      linkedAltDiscordId: params.linkedAltDiscordId,
+      linkedAltUsername: params.linkedAltUsername,
+      attemptedAt: new Date(),
     });
-
-    if (!res.ok) {
-      const errBody = await res.text().catch(() => "");
-      console.error(
-        `[Audit Webhook] Webhook request failed with status HTTP ${res.status}:`,
-        errBody
-      );
-    }
   } catch (err) {
-    console.error("[Audit Webhook] Error dispatching webhook log:", err);
+    console.error("[Verification] Failed to dispatch failure audit log:", err);
   }
 }
 
@@ -167,7 +121,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 3. Extract Client's Raw Plain-Text IP (No Hashing)
+    // 3. Extract Client's Raw Plain-Text IP (No Hashing) — supports both IPv4 and IPv6
     const rawIp = getClientIp(req);
     const userIp = (isValidIp(rawIp) ? rawIp : "127.0.0.1").trim() || "127.0.0.1";
 
@@ -183,6 +137,14 @@ export async function POST(req: NextRequest) {
     }
 
     if (blacklisted) {
+      await logFailure({
+        discordId,
+        username: `User_${discordId.slice(-4)}`,
+        ipAddress: userIp,
+        failureCode: "IP_BLACKLISTED",
+        failureReason: `IP address \`${userIp}\` is blacklisted.${blacklisted.reason ? ` Reason: ${blacklisted.reason}` : ""}`,
+      });
+
       return NextResponse.json(
         {
           success: false,
@@ -203,6 +165,14 @@ export async function POST(req: NextRequest) {
     // 5. Proxy & VPN Detection via ProxyCheck.io
     const proxyCheck = await checkIpWithProxyCheck(userIp);
     if (!proxyCheck.isClean) {
+      await logFailure({
+        discordId,
+        username: `User_${discordId.slice(-4)}`,
+        ipAddress: userIp,
+        failureCode: "VPN_OR_PROXY_DETECTED",
+        failureReason: `VPN/Proxy detected. Type: ${proxyCheck.type || "Unknown"}, Risk: ${proxyCheck.risk ?? "N/A"}, Provider: ${proxyCheck.provider || "Unknown"}`,
+      });
+
       return NextResponse.json(
         {
           success: false,
@@ -226,7 +196,7 @@ export async function POST(req: NextRequest) {
     const [ipCountResult, ipLimitResult] = await Promise.all([
       supabase
         .from("verifications")
-        .select("id, discord_id", { count: "exact" })
+        .select("id, discord_id, discord_username", { count: "exact" })
         .eq("ip_address", userIp),
       supabase
         .from("ip_limits")
@@ -259,6 +229,19 @@ export async function POST(req: NextRequest) {
       );
 
       if (!allBelongToThisUser) {
+        // Find the first alt account to report
+        const altAccount = existingIpAccounts.find((r) => r.discord_id !== discordId);
+
+        await logFailure({
+          discordId,
+          username: `User_${discordId.slice(-4)}`,
+          ipAddress: userIp,
+          failureCode: "IP_LIMIT_REACHED",
+          failureReason: `Exceeded IP limit (${currentAccountCount}/${maxAccounts} accounts). Detected alternative account.`,
+          linkedAltDiscordId: altAccount?.discord_id ?? null,
+          linkedAltUsername: altAccount?.discord_username ?? null,
+        });
+
         return NextResponse.json(
           {
             success: false,
@@ -299,6 +282,16 @@ export async function POST(req: NextRequest) {
     }
 
     if (singleIpRecord && maxAccounts === 1) {
+      await logFailure({
+        discordId,
+        username: `User_${discordId.slice(-4)}`,
+        ipAddress: userIp,
+        failureCode: "IP_ALREADY_USED",
+        failureReason: `IP already used by another account. Alt detection triggered.`,
+        linkedAltDiscordId: singleIpRecord.discord_id,
+        linkedAltUsername: singleIpRecord.discord_username,
+      });
+
       return NextResponse.json(
         {
           success: false,
@@ -318,7 +311,7 @@ export async function POST(req: NextRequest) {
     }
 
     // 8. Fetch Discord Member Details & Guild Verification
-    const guildId = process.env.DISCORD_GUILD_ID;
+    const guildId = getGuildId();
     const verifiedRoleId = process.env.DISCORD_VERIFIED_ROLE_ID;
     const unverifiedRoleId = process.env.DISCORD_UNVERIFIED_ROLE_ID;
 
@@ -336,6 +329,14 @@ export async function POST(req: NextRequest) {
           "[Discord API] Bot token is invalid (401 Unauthorized). Role assignment will be skipped. Please fix DISCORD_BOT_TOKEN."
         );
       } else if (memberResult.status === 404 || !memberResult.member) {
+        await logFailure({
+          discordId,
+          username: discordUsername,
+          ipAddress: userIp,
+          failureCode: "MEMBER_NOT_IN_GUILD",
+          failureReason: "User is not a member of the Discord server.",
+        });
+
         return NextResponse.json(
           {
             success: false,
@@ -355,9 +356,7 @@ export async function POST(req: NextRequest) {
             ? `${memberDetails.user.username}#${memberDetails.user.discriminator}`
             : memberDetails.user.username;
 
-        avatarUrl = memberDetails.user.avatar
-          ? `https://cdn.discordapp.com/avatars/${memberDetails.user.id}/${memberDetails.user.avatar}.png?size=128`
-          : `https://cdn.discordapp.com/embed/avatars/${parseInt(discordId) % 5}.png`;
+        avatarUrl = buildAvatarUrl(discordId, memberDetails.user.avatar);
       }
     }
 
@@ -413,15 +412,18 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 11. Dispatch Rich Discord Webhook Audit Embed
-    await sendAuditWebhook({
-      discordId,
-      username: discordUsername,
-      avatarUrl,
-      ip_address: userIp,
-      userIp,
-      verifiedAt,
-    });
+    // 11. Dispatch Audit Log — Success
+    if (guildId) {
+      await sendAuditLog({
+        type: "success",
+        guildId,
+        discordId,
+        username: discordUsername,
+        avatarUrl,
+        ipAddress: userIp,
+        verifiedAt,
+      });
+    }
 
     return NextResponse.json({
       success: true,

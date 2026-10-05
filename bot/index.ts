@@ -8,10 +8,12 @@ import {
   REST,
   Routes,
   SlashCommandBuilder,
+  SlashCommandSubcommandBuilder,
   PermissionFlagsBits,
   ChatInputCommandInteraction,
   ButtonInteraction,
   Message,
+  ChannelType,
 } from "discord.js";
 import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
@@ -110,7 +112,7 @@ client.once("ready", async () => {
   console.log(`Target Guild ID: ${GUILD_ID || "Not set"}`);
   console.log(`====================================================`);
 
-  // Register slash commands: /setup-verify, /blockip, /unblockip
+  // Register slash commands: /setup-verify, /blockip, /unblockip, /limit, /log
   if (BOT_TOKEN && CLIENT_ID) {
     try {
       const rest = new REST({ version: "10" }).setToken(BOT_TOKEN);
@@ -127,7 +129,7 @@ client.once("ready", async () => {
         .addStringOption((option) =>
           option
             .setName("ip")
-            .setDescription("The raw plain-text IP address to blacklist (e.g. 192.168.1.1)")
+            .setDescription("The raw plain-text IP address to blacklist (e.g. 192.168.1.1 or 2001:db8::1)")
             .setRequired(true)
         )
         .addStringOption((option) =>
@@ -169,8 +171,36 @@ client.once("ready", async () => {
         .addStringOption((option) =>
           option
             .setName("ip")
-            .setDescription("Direct plain-text IP address to set the limit for (e.g. 203.0.113.5)")
+            .setDescription("Direct plain-text IP address to set the limit for (e.g. 203.0.113.5 or 2001:db8::1)")
             .setRequired(false)
+        );
+
+      // /log command with subcommands: set, disable, status
+      const logCommand = new SlashCommandBuilder()
+        .setName("log")
+        .setDescription("Configure the SecuritySTEX audit log channel for this server")
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addSubcommand(
+          new SlashCommandSubcommandBuilder()
+            .setName("set")
+            .setDescription("Set the channel where audit logs will be sent")
+            .addChannelOption((option) =>
+              option
+                .setName("channel")
+                .setDescription("The text channel to receive audit log messages")
+                .addChannelTypes(ChannelType.GuildText)
+                .setRequired(true)
+            )
+        )
+        .addSubcommand(
+          new SlashCommandSubcommandBuilder()
+            .setName("disable")
+            .setDescription("Disable audit logging for this server")
+        )
+        .addSubcommand(
+          new SlashCommandSubcommandBuilder()
+            .setName("status")
+            .setDescription("Show the current audit log channel configuration")
         );
 
       const commandsJson = [
@@ -178,18 +208,19 @@ client.once("ready", async () => {
         blockIpCommand.toJSON(),
         unblockIpCommand.toJSON(),
         limitCommand.toJSON(),
+        logCommand.toJSON(),
       ];
 
       if (GUILD_ID) {
         await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
           body: commandsJson,
         });
-        console.log(`✅ Registered guild slash commands (/setup-verify, /blockip, /unblockip, /limit) for guild ${GUILD_ID}`);
+        console.log(`✅ Registered guild slash commands (/setup-verify, /blockip, /unblockip, /limit, /log) for guild ${GUILD_ID}`);
       } else {
         await rest.put(Routes.applicationCommands(CLIENT_ID), {
           body: commandsJson,
         });
-        console.log(`✅ Registered global slash commands (/setup-verify, /blockip, /unblockip, /limit)`);
+        console.log(`✅ Registered global slash commands (/setup-verify, /blockip, /unblockip, /limit, /log)`);
       }
     } catch (err) {
       console.warn("⚠️ Warning: Failed to register slash commands:", err);
@@ -654,6 +685,159 @@ client.on("interactionCreate", async (interaction) => {
         await cmdInteraction.editReply(`❌ Database error while unblocking IP: ${msg}`);
       }
       return;
+    }
+
+    // /log set | /log disable | /log status
+    if (cmdInteraction.commandName === "log") {
+      if (!cmdInteraction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+        await cmdInteraction.reply({
+          content: "❌ You need Administrator permissions to use this command.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const guildId = cmdInteraction.guildId;
+      if (!guildId) {
+        await cmdInteraction.reply({
+          content: "❌ This command can only be used inside a server.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const subcommand = cmdInteraction.options.getSubcommand(true);
+
+      // /log set <channel>
+      if (subcommand === "set") {
+        const channel = cmdInteraction.options.getChannel("channel", true);
+
+        await cmdInteraction.deferReply({ ephemeral: true });
+
+        try {
+          const { error } = await supabase.from("guild_settings").upsert(
+            {
+              guild_id: guildId,
+              log_channel_id: channel.id,
+              updated_at: new Date().toISOString(),
+            },
+            { onConflict: "guild_id" }
+          );
+
+          if (error) throw error;
+
+          const embed = new EmbedBuilder()
+            .setColor(0x10b981) // Emerald
+            .setTitle("📋 Audit Log Channel Configured")
+            .setDescription(
+              `Verification audit logs will now be sent to <#${channel.id}>.`
+            )
+            .addFields(
+              { name: "Channel", value: `<#${channel.id}>`, inline: true },
+              { name: "Channel ID", value: `\`${channel.id}\``, inline: true },
+              { name: "Configured By", value: `<@${cmdInteraction.user.id}>`, inline: true }
+            )
+            .setFooter({ text: "Both successful and failed verifications will be logged." })
+            .setTimestamp();
+
+          await cmdInteraction.editReply({ embeds: [embed] });
+          console.log(`[Log] /log set channel #${channel.name || channel.id} in guild ${guildId} by ${cmdInteraction.user.tag}`);
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          await cmdInteraction.editReply(`❌ Database error saving log channel: ${msg}`);
+        }
+        return;
+      }
+
+      // /log disable
+      if (subcommand === "disable") {
+        await cmdInteraction.deferReply({ ephemeral: true });
+
+        try {
+          const { error } = await supabase.from("guild_settings").upsert(
+            {
+              guild_id: guildId,
+              log_channel_id: null,
+              updated_at: new Date().toISOString(),
+            },
+            { onConflict: "guild_id" }
+          );
+
+          if (error) throw error;
+
+          const embed = new EmbedBuilder()
+            .setColor(0xfbbf24) // Amber
+            .setTitle("📋 Audit Logging Disabled")
+            .setDescription(
+              "Verification audit logging has been disabled for this server. No further log embeds will be sent to any channel."
+            )
+            .addFields(
+              { name: "Disabled By", value: `<@${cmdInteraction.user.id}>`, inline: true }
+            )
+            .setFooter({ text: "Use /log set to re-enable at any time." })
+            .setTimestamp();
+
+          await cmdInteraction.editReply({ embeds: [embed] });
+          console.log(`[Log] /log disable in guild ${guildId} by ${cmdInteraction.user.tag}`);
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          await cmdInteraction.editReply(`❌ Database error disabling log channel: ${msg}`);
+        }
+        return;
+      }
+
+      // /log status
+      if (subcommand === "status") {
+        await cmdInteraction.deferReply({ ephemeral: true });
+
+        try {
+          const { data, error } = await supabase
+            .from("guild_settings")
+            .select("log_channel_id, updated_at")
+            .eq("guild_id", guildId)
+            .maybeSingle();
+
+          if (error) throw error;
+
+          const logChannelId = data?.log_channel_id;
+          const updatedAt = data?.updated_at;
+
+          const embed = new EmbedBuilder()
+            .setColor(logChannelId ? 0x10b981 : 0x6b7280) // Emerald if active, Gray if disabled
+            .setTitle("📋 Audit Log Status")
+            .setDescription(
+              logChannelId
+                ? `Audit logs are currently being sent to <#${logChannelId}>.`
+                : "Audit logging is currently **disabled** for this server."
+            )
+            .addFields(
+              {
+                name: "Status",
+                value: logChannelId ? "✅ Enabled" : "❌ Disabled",
+                inline: true,
+              },
+              ...(logChannelId
+                ? [{ name: "Channel", value: `<#${logChannelId}>`, inline: true }]
+                : []),
+              ...(updatedAt
+                ? [
+                    {
+                      name: "Last Updated",
+                      value: `<t:${Math.floor(new Date(updatedAt).getTime() / 1000)}:F>`,
+                      inline: false,
+                    },
+                  ]
+                : [])
+            )
+            .setTimestamp();
+
+          await cmdInteraction.editReply({ embeds: [embed] });
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          await cmdInteraction.editReply(`❌ Database error fetching log status: ${msg}`);
+        }
+        return;
+      }
     }
   }
 
