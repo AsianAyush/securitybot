@@ -64,3 +64,16 @@ export function getRequestOrigin(req?: Request | { headers?: Headers | Record<st
 
   return getAppUrl();
 }
+
+/**
+ * Constructs the full verification gateway URL for a Discord user snowflake.
+ * Defaults to dynamic getAppUrl() with production domain fallback.
+ * 
+ * @example
+ *   buildVerificationUrl("123456789012345678") => "https://stexsecurity.vercel.app/verify?discord_id=123456789012345678"
+ */
+export function buildVerificationUrl(discordId: string, baseUrl?: string): string {
+  const base = (baseUrl || getAppUrl()).replace(/\/$/, "");
+  return `${base}/verify?discord_id=${encodeURIComponent(discordId.trim())}`;
+}
+

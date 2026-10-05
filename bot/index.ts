@@ -19,6 +19,7 @@ import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 import path from "path";
 import { Database } from "../lib/database.types";
+import { getAppUrl, buildVerificationUrl } from "../lib/url";
 
 // Load environment variables from .env.local or .env
 dotenv.config({ path: path.resolve(process.cwd(), ".env.local") });
@@ -27,11 +28,7 @@ dotenv.config({ path: path.resolve(process.cwd(), ".env") });
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 const GUILD_ID = process.env.DISCORD_GUILD_ID;
-const APP_URL = (
-  process.env.NEXT_PUBLIC_APP_URL ||
-  process.env.NEXT_PUBLIC_BASE_URL ||
-  "https://stexsecurity.vercel.app"
-).replace(/\/$/, "");
+
 
 // Supabase configuration
 const SUPABASE_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -112,7 +109,7 @@ client.once("ready", async () => {
   console.log(`====================================================`);
   console.log(`🤖 SecuritySTEX Discord Bot is ONLINE!`);
   console.log(`Logged in as: ${client.user?.tag} (ID: ${client.user?.id})`);
-  console.log(`Verification Gateway Base URL: ${APP_URL}`);
+  console.log(`Verification Gateway Base URL: ${getAppUrl()}`);
   console.log(`Target Guild ID: ${GUILD_ID || "Not set"}`);
   console.log(`Environment: ${process.env.NODE_ENV || "production"}`);
   console.log(`Supabase Host: ${SUPABASE_URL ? (() => { try { return new URL(SUPABASE_URL).hostname; } catch { return "configured"; } })() : "Not set"}`);
@@ -855,7 +852,7 @@ client.on("interactionCreate", async (interaction) => {
 
     if (btnInteraction.customId === "securitystex_verify_button") {
       const user = btnInteraction.user;
-      const verifyUrl = `${APP_URL}/verify?discord_id=${user.id}`;
+      const verifyUrl = `${getAppUrl()}/verify?discord_id=${user.id}`;
 
       const ephemeralEmbed = new EmbedBuilder()
         .setColor(0x6366f1)
