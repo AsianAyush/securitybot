@@ -65,7 +65,7 @@ export async function getLogChannelId(guildId: string): Promise<string | null> {
       .maybeSingle();
 
     if (error) {
-      console.error("[AuditLog] Error fetching guild_settings:", error);
+      console.error("[AuditLog] Error fetching guild_settings:", error.message || error);
       return null;
     }
 
@@ -186,49 +186,45 @@ function buildFailureEmbed(params: AuditLogFailureParams) {
 }
 
 /**
- * Sends an audit log embed to the configured guild log channel via the Discord bot REST API.
- * This uses the Discord REST API directly (no bot process dependency) by POSTing a message
- * to the designated channel using the bot token.
- *
- * Falls back to the legacy webhook URL (DISCORD_LOG_WEBHOOK_URL) if no guild log channel
- * is configured or if the channel send fails.
+ * Sends an audit log embed to the configured guild log channel via the Discord bot REST API
+ * and/or the configured webhook URL (DISCORD_LOG_WEBHOOK_URL).
  */
 export async function sendAuditLog(params: AuditLogParams): Promise<void> {
   const embed = params.type === "success" ? buildSuccessEmbed(params) : buildFailureEmbed(params);
 
-  // 1. Try sending to the guild-configured log channel via Discord REST API
-  const logChannelId = await getLogChannelId(params.guildId);
-  const botToken = process.env.DISCORD_BOT_TOKEN;
+  // 1. Send to the guild-configured log channel via Discord REST API (if configured)
+  if (params.guildId) {
+    const logChannelId = await getLogChannelId(params.guildId);
+    const botToken = process.env.DISCORD_BOT_TOKEN;
 
-  if (logChannelId && botToken) {
-    try {
-      const res = await fetch(
-        `https://discord.com/api/v10/channels/${logChannelId}/messages`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bot ${botToken}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ embeds: [embed] }),
+    if (logChannelId && botToken) {
+      try {
+        const res = await fetch(
+          `https://discord.com/api/v10/channels/${logChannelId}/messages`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bot ${botToken}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ embeds: [embed] }),
+          }
+        );
+
+        if (!res.ok) {
+          const errBody = await res.text().catch(() => "");
+          console.error(
+            `[AuditLog] Failed to send to channel ${logChannelId} (HTTP ${res.status}):`,
+            errBody
+          );
         }
-      );
-
-      if (res.ok) {
-        return; // Successfully sent to configured channel
+      } catch (err) {
+        console.error("[AuditLog] Exception sending to log channel:", err);
       }
-
-      const errBody = await res.text().catch(() => "");
-      console.error(
-        `[AuditLog] Failed to send to channel ${logChannelId} (HTTP ${res.status}):`,
-        errBody
-      );
-    } catch (err) {
-      console.error("[AuditLog] Exception sending to log channel:", err);
     }
   }
 
-  // 2. Fallback: Send to the legacy webhook URL (if configured)
+  // 2. Dispatch to the webhook URL (if configured)
   const webhookUrl = process.env.DISCORD_LOG_WEBHOOK_URL;
   if (!webhookUrl || webhookUrl.trim() === "" || webhookUrl === "your-discord-webhook-url-here") {
     return;

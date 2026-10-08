@@ -84,11 +84,7 @@ export function normalizeIpv6(raw: string): string {
   if (bestLen >= 2) {
     const before = groups.slice(0, bestStart);
     const after = groups.slice(bestStart + bestLen);
-    const compressed =
-      (before.length === 0 ? ":" : before.join(":")) +
-      ":" +
-      (after.length === 0 ? "" : after.join(":"));
-    return compressed;
+    return `${before.join(":")}::${after.join(":")}`;
   }
 
   return groups.join(":");

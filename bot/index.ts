@@ -45,6 +45,33 @@ const supabase = createClient<Database>(SUPABASE_URL || "http://localhost:54321"
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
+/**
+ * Safely extracts a meaningful error message string from unknown errors,
+ * properly handling PostgREST / Supabase error objects without producing [object Object].
+ */
+function extractErrorMessage(err: unknown): string {
+  if (!err) return "Unknown error";
+  if (err instanceof Error) return err.message;
+  if (typeof err === "object") {
+    const obj = err as Record<string, unknown>;
+    if (typeof obj.message === "string" && obj.message) {
+      return obj.message;
+    }
+    if (typeof obj.error === "string" && obj.error) {
+      return obj.error;
+    }
+    if (typeof obj.details === "string" && obj.details) {
+      return obj.details;
+    }
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return String(err);
+    }
+  }
+  return String(err);
+}
+
 if (!BOT_TOKEN) {
   console.error("❌ ERROR: DISCORD_BOT_TOKEN is not set in environment variables!");
   console.error("Please add DISCORD_BOT_TOKEN to your .env or .env.local file.");
@@ -542,7 +569,8 @@ client.on("interactionCreate", async (interaction) => {
         await cmdInteraction.editReply({ embeds: [embed] });
         console.log(`[Blacklist] /blockip ${targetIp} by ${cmdInteraction.user.tag}`);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = extractErrorMessage(err);
+        console.error(`[Blacklist] /blockip error:`, msg, err);
         await cmdInteraction.editReply(`❌ Database error while blacklisting IP: ${msg}`);
       }
       return;
@@ -599,7 +627,8 @@ client.on("interactionCreate", async (interaction) => {
           targetIp = data.ip_address;
           resolvedUsername = data.discord_username || targetUser.username;
         } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = extractErrorMessage(err);
+          console.error(`[Limit] /limit user lookup error:`, msg, err);
           await cmdInteraction.editReply(`❌ Database error looking up user's IP: ${msg}`);
           return;
         }
@@ -640,7 +669,8 @@ client.on("interactionCreate", async (interaction) => {
         await cmdInteraction.editReply({ embeds: [embed] });
         console.log(`[Limit] /limit set ${targetIp} → max ${newMax} by ${cmdInteraction.user.tag}`);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = extractErrorMessage(err);
+        console.error(`[Limit] /limit set error:`, msg, err);
         await cmdInteraction.editReply(`❌ Database error setting IP limit: ${msg}`);
       }
       return;
@@ -686,7 +716,8 @@ client.on("interactionCreate", async (interaction) => {
         await cmdInteraction.editReply({ embeds: [embed] });
         console.log(`[Blacklist] /unblockip ${targetIp} by ${cmdInteraction.user.tag}`);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = extractErrorMessage(err);
+        console.error(`[Blacklist] /unblockip error:`, msg, err);
         await cmdInteraction.editReply(`❌ Database error while unblocking IP: ${msg}`);
       }
       return;
@@ -748,7 +779,8 @@ client.on("interactionCreate", async (interaction) => {
           await cmdInteraction.editReply({ embeds: [embed] });
           console.log(`[Log] /log set channel #${channel.name || channel.id} in guild ${guildId} by ${cmdInteraction.user.tag}`);
         } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = extractErrorMessage(err);
+          console.error(`[Log] /log set database error in guild ${guildId}:`, msg, err);
           await cmdInteraction.editReply(`❌ Database error saving log channel: ${msg}`);
         }
         return;
@@ -785,7 +817,8 @@ client.on("interactionCreate", async (interaction) => {
           await cmdInteraction.editReply({ embeds: [embed] });
           console.log(`[Log] /log disable in guild ${guildId} by ${cmdInteraction.user.tag}`);
         } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = extractErrorMessage(err);
+          console.error(`[Log] /log disable database error in guild ${guildId}:`, msg, err);
           await cmdInteraction.editReply(`❌ Database error disabling log channel: ${msg}`);
         }
         return;
@@ -838,7 +871,8 @@ client.on("interactionCreate", async (interaction) => {
 
           await cmdInteraction.editReply({ embeds: [embed] });
         } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = extractErrorMessage(err);
+          console.error(`[Log] /log status database error in guild ${guildId}:`, msg, err);
           await cmdInteraction.editReply(`❌ Database error fetching log status: ${msg}`);
         }
         return;

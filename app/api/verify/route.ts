@@ -41,12 +41,11 @@ async function logFailure(params: {
   linkedAltUsername?: string | null;
 }): Promise<void> {
   const guildId = getGuildId();
-  if (!guildId) return;
 
   try {
     await sendAuditLog({
       type: "failure",
-      guildId,
+      guildId: guildId || "",
       discordId: params.discordId,
       username: params.username,
       avatarUrl: params.avatarUrl,
@@ -413,17 +412,15 @@ export async function POST(req: NextRequest) {
     }
 
     // 11. Dispatch Audit Log — Success
-    if (guildId) {
-      await sendAuditLog({
-        type: "success",
-        guildId,
-        discordId,
-        username: discordUsername,
-        avatarUrl,
-        ipAddress: userIp,
-        verifiedAt,
-      });
-    }
+    await sendAuditLog({
+      type: "success",
+      guildId: guildId || "",
+      discordId,
+      username: discordUsername,
+      avatarUrl,
+      ipAddress: userIp,
+      verifiedAt,
+    });
 
     return NextResponse.json({
       success: true,
