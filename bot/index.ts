@@ -20,6 +20,7 @@ import dotenv from "dotenv";
 import path from "path";
 import { Database } from "../lib/database.types";
 import { getAppUrl, buildVerificationUrl } from "../lib/url";
+export { sendAuditLog } from "../lib/discord";
 
 // Load environment variables from .env.local or .env
 dotenv.config({ path: path.resolve(process.cwd(), ".env.local") });

@@ -17,6 +17,7 @@ export interface Database {
           id: string;
           discord_id: string;
           discord_username: string;
+          username: string | null;
           ip_address: string;
           verified_at: string;
         };
@@ -24,6 +25,7 @@ export interface Database {
           id?: string;
           discord_id: string;
           discord_username: string;
+          username?: string | null;
           ip_address: string;
           verified_at?: string;
         };
@@ -31,6 +33,7 @@ export interface Database {
           id?: string;
           discord_id?: string;
           discord_username?: string;
+          username?: string | null;
           ip_address?: string;
           verified_at?: string;
         };

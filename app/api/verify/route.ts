@@ -2,8 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getClientIp, isValidIp, normalizeIp } from "@/lib/ip";
 import { checkIpWithProxyCheck } from "@/lib/proxycheck";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { assignVerifiedRoles, getDiscordMember } from "@/lib/discord";
-import { sendAuditLog } from "@/lib/audit-log";
+import { assignVerifiedRoles, getDiscordMember, sendAuditLog } from "@/lib/discord";
 
 export const dynamic = "force-dynamic";
 
@@ -72,6 +71,7 @@ async function logFailure(params: {
   try {
     await sendAuditLog(params.guildId, {
       type: "failure",
+      guildId: params.guildId,
       discordId: params.discordId,
       username: params.username,
       avatarUrl: params.avatarUrl,
@@ -163,8 +163,8 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 3. Resolve Real Discord Username & Avatar early (Fixes placeholder User_5524 handles)
-    let discordUsername = requestedUsername || requestedGlobalName || "";
+    // 3. Resolve Real Discord Username & Avatar early (no random string fallbacks like User_5524)
+    let discordUser: { username?: string; global_name?: string | null; discriminator?: string } | null = null;
     let avatarUrl: string | null = null;
     let memberDetails = null;
 
@@ -174,16 +174,13 @@ export async function POST(req: NextRequest) {
         const memberResult = await getDiscordMember(guildId, discordId);
         if (memberResult.member) {
           memberDetails = memberResult.member;
-          discordUsername =
-            memberDetails.user.discriminator && memberDetails.user.discriminator !== "0"
-              ? `${memberDetails.user.username}#${memberDetails.user.discriminator}`
-              : (memberDetails.user.global_name || memberDetails.user.username);
-          avatarUrl = buildAvatarUrl(discordId, memberDetails.user.avatar);
+          discordUser = memberResult.member.user;
+          avatarUrl = buildAvatarUrl(discordId, memberResult.member.user.avatar);
         }
       }
 
-      // If username not yet resolved from guild member, query Discord user API directly
-      if (!discordUsername) {
+      // If user profile not yet resolved, query Discord user API directly
+      if (!discordUser) {
         try {
           const userRes = await fetch(`https://discord.com/api/v10/users/${discordId}`, {
             headers: {
@@ -191,13 +188,9 @@ export async function POST(req: NextRequest) {
             },
           });
           if (userRes.ok) {
-            const u = await userRes.json();
-            discordUsername =
-              u.discriminator && u.discriminator !== "0"
-                ? `${u.username}#${u.discriminator}`
-                : (u.global_name || u.username);
-            if (u.avatar && !avatarUrl) {
-              avatarUrl = buildAvatarUrl(discordId, u.avatar);
+            discordUser = await userRes.json();
+            if (discordUser && (discordUser as any).avatar && !avatarUrl) {
+              avatarUrl = buildAvatarUrl(discordId, (discordUser as any).avatar);
             }
           }
         } catch (fetchErr) {
@@ -206,10 +199,16 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Fallback only if no username was resolved from OAuth, member, or user API
-    if (!discordUsername) {
-      discordUsername = `User_${discordId.slice(-4)}`;
-    }
+    // Extract real handle using standard OAuth resolution (stops random string fallbacks)
+    const username =
+      (discordUser
+        ? (discordUser.discriminator && discordUser.discriminator !== "0"
+            ? `${discordUser.username}#${discordUser.discriminator}`
+            : (discordUser.username || discordUser.global_name || 'Unknown User'))
+        : null) ||
+      requestedUsername ||
+      requestedGlobalName ||
+      'Unknown User';
 
     // 4. Already Verified Check: Block re-verification of existing Discord IDs early
     const { data: existingVerification, error: existingVerificationError } = await supabase
@@ -258,7 +257,7 @@ export async function POST(req: NextRequest) {
       await logFailure({
         guildId,
         discordId,
-        username: discordUsername,
+        username,
         avatarUrl,
         ipAddress: userIp,
         failureCode: "IP_BLACKLISTED",
@@ -288,7 +287,7 @@ export async function POST(req: NextRequest) {
       await logFailure({
         guildId,
         discordId,
-        username: discordUsername,
+        username,
         avatarUrl,
         ipAddress: userIp,
         failureCode: "VPN_OR_PROXY_DETECTED",
@@ -350,7 +349,7 @@ export async function POST(req: NextRequest) {
         await logFailure({
           guildId,
           discordId,
-          username: discordUsername,
+          username,
           avatarUrl,
           ipAddress: userIp,
           failureCode: "IP_LIMIT_REACHED",
@@ -400,7 +399,7 @@ export async function POST(req: NextRequest) {
       await logFailure({
         guildId,
         discordId,
-        username: discordUsername,
+        username,
         avatarUrl,
         ipAddress: userIp,
         failureCode: "IP_ALREADY_USED",
@@ -435,7 +434,7 @@ export async function POST(req: NextRequest) {
           await logFailure({
             guildId,
             discordId,
-            username: discordUsername,
+            username,
             avatarUrl,
             ipAddress: userIp,
             failureCode: "MEMBER_NOT_IN_GUILD",
@@ -459,10 +458,11 @@ export async function POST(req: NextRequest) {
 
     const verifiedAt = new Date();
 
-    // 11. Insert Verification Record into Supabase with Real Username & Normalized IP
+    // 11. Explicitly persist real username to verifications (and optional members table)
     const verificationPayload = {
       discord_id: discordId,
-      discord_username: discordUsername,
+      discord_username: username,
+      username: username,
       ip_address: userIp,
       verified_at: verifiedAt.toISOString(),
     };
@@ -486,7 +486,28 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 12. Assign Discord Roles via Discord REST API (PUT /guilds/{guild.id}/members/{user.id}/roles/{role.id})
+    // Optional sync to members table if configured
+    try {
+      await supabase.from("members" as any).upsert(
+        {
+          discord_id: discordId,
+          username: username,
+          ip_address: userIp,
+          verified_at: verifiedAt.toISOString(),
+        },
+        { onConflict: "discord_id" }
+      );
+    } catch {
+      // members table is optional
+    }
+
+    // 12. Role Swap Logic:
+    // Add Verified role (PUT /guilds/{guild_id}/members/{user_id}/roles/{verified_role_id})
+    // Remove Unverified role (DELETE /guilds/{guild_id}/members/{user_id}/roles/{unverified_role_id})
+    // Both wrapped in try/catch so a missing unverified role doesn't fail verification.
+    let verifiedRoleAssigned = false;
+    let unverifiedRoleRemoved = false;
+
     if (guildId && verifiedRoleId) {
       if (!process.env.DISCORD_BOT_TOKEN) {
         console.error(
@@ -503,25 +524,32 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      const roleResult = await assignVerifiedRoles({
-        guildId,
-        discordId,
-        verifiedRoleId,
-        unverifiedRoleId,
-      });
+      try {
+        const roleResult = await assignVerifiedRoles({
+          guildId,
+          discordId,
+          verifiedRoleId,
+          unverifiedRoleId,
+        });
 
-      if (!roleResult.success) {
-        console.error(`[Verification] Role assignment failed for ${discordId}:`, roleResult.error);
-        return NextResponse.json(
-          {
-            success: false,
-            code: "ROLE_ASSIGNMENT_FAILED",
-            error:
-              roleResult.error ||
-              "Your identity was validated, but Discord role assignment failed. Ensure the bot's highest role is positioned ABOVE the verified role in Server Settings > Roles.",
-          },
-          { status: 502 }
-        );
+        if (!roleResult.success) {
+          console.error(`[Verification] Role assignment failed for ${discordId}:`, roleResult.error);
+          return NextResponse.json(
+            {
+              success: false,
+              code: "ROLE_ASSIGNMENT_FAILED",
+              error:
+                roleResult.error ||
+                "Your identity was validated, but Discord role assignment failed. Ensure the bot's highest role is positioned ABOVE the verified role in Server Settings > Roles.",
+            },
+            { status: 502 }
+          );
+        }
+
+        verifiedRoleAssigned = roleResult.verifiedAssigned;
+        unverifiedRoleRemoved = roleResult.unverifiedRemoved;
+      } catch (roleErr) {
+        console.error("[Verification] Role swap error (non-blocking for verification):", roleErr);
       }
     } else {
       console.warn(
@@ -533,11 +561,16 @@ export async function POST(req: NextRequest) {
     try {
       await sendAuditLog(guildId, {
         type: "success",
+        guildId,
         discordId,
-        username: discordUsername,
+        username,
         avatarUrl,
         ipAddress: userIp,
         verifiedAt,
+        verifiedRoleId,
+        unverifiedRoleId,
+        verifiedRoleAssigned,
+        unverifiedRoleRemoved,
       });
     } catch (auditErr) {
       console.error("[Verification] Failed to dispatch success audit log:", auditErr);
@@ -550,9 +583,16 @@ export async function POST(req: NextRequest) {
         "Verification completed successfully! You may now close this tab and return to Discord.",
       data: {
         discord_id: discordId,
-        discord_username: discordUsername,
+        username,
+        discord_username: username,
         ip_address: userIp,
         verified_at: verifiedAt.toISOString(),
+        roles: {
+          verified_role_id: verifiedRoleId || null,
+          unverified_role_id: unverifiedRoleId || null,
+          verified_role_assigned: verifiedRoleAssigned,
+          unverified_role_removed: unverifiedRoleRemoved,
+        },
       },
     });
   } catch (error: unknown) {

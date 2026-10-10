@@ -7,6 +7,10 @@ ALTER TABLE public.verifications ALTER COLUMN ip_address TYPE TEXT;
 ALTER TABLE public.ip_limits ALTER COLUMN ip_address TYPE TEXT;
 ALTER TABLE public.ip_blacklist ALTER COLUMN ip_address TYPE TEXT;
 
+-- Add username column to verifications if missing (in addition to discord_username)
+ALTER TABLE public.verifications ADD COLUMN IF NOT EXISTS username TEXT;
+UPDATE public.verifications SET username = discord_username WHERE username IS NULL;
+
 -- 2. Add dynamic role configuration columns to guild_settings
 ALTER TABLE public.guild_settings ADD COLUMN IF NOT EXISTS verified_role_id TEXT;
 ALTER TABLE public.guild_settings ADD COLUMN IF NOT EXISTS unverified_role_id TEXT;

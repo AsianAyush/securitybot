@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { exchangeDiscordOAuthCode, getDiscordOAuthUser } from "@/lib/discord";
 import { getRequestOrigin } from "@/lib/url";
 
+import { getSupabaseAdmin } from "@/lib/supabase";
+
 export const dynamic = "force-dynamic";
 
 /**
@@ -38,24 +40,41 @@ export async function GET(req: NextRequest) {
       redirectUri,
     });
 
-    // 2. Fetch authenticated Discord user profile
-    const user = await getDiscordOAuthUser(tokenData.access_token);
+    // 2. Fetch authenticated Discord user profile from OAuth @me
+    const discordUser = await getDiscordOAuthUser(tokenData.access_token);
 
-    if (!user || !user.id) {
+    if (!discordUser || !discordUser.id) {
       throw new Error("Unable to retrieve Discord user profile from access token.");
     }
 
-    // 3. Extract real username and redirect user to the verification gateway
+    // Extract the real handle using specified logic
+    const username = discordUser.username || discordUser.global_name || 'Unknown User';
+
+    // Sync real username if record exists
+    try {
+      const supabase = getSupabaseAdmin();
+      await supabase
+        .from("verifications")
+        .update({
+          discord_username: username,
+          username: username,
+        })
+        .eq("discord_id", discordUser.id);
+    } catch (dbErr) {
+      console.warn("[OAuth Callback] Note: Non-blocking DB update:", dbErr);
+    }
+
+    // 3. Redirect user to the verification gateway with their Discord ID and real username
     const params = new URLSearchParams({
-      discord_id: user.id,
-      username: user.username,
+      discord_id: discordUser.id,
+      username: username,
     });
 
-    if (user.global_name) {
-      params.set("global_name", user.global_name);
+    if (discordUser.global_name) {
+      params.set("global_name", discordUser.global_name);
     }
-    if (user.discriminator && user.discriminator !== "0") {
-      params.set("discriminator", user.discriminator);
+    if (discordUser.discriminator && discordUser.discriminator !== "0") {
+      params.set("discriminator", discordUser.discriminator);
     }
 
     return NextResponse.redirect(`${origin}/verify?${params.toString()}`);
