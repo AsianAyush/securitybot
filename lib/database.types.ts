@@ -82,17 +82,59 @@ export interface Database {
         Row: {
           guild_id: string;
           log_channel_id: string | null;
+          verified_role_id: string | null;
+          unverified_role_id: string | null;
           updated_at: string;
         };
         Insert: {
           guild_id: string;
           log_channel_id?: string | null;
+          verified_role_id?: string | null;
+          unverified_role_id?: string | null;
           updated_at?: string;
         };
         Update: {
           guild_id?: string;
           log_channel_id?: string | null;
+          verified_role_id?: string | null;
+          unverified_role_id?: string | null;
           updated_at?: string;
+        };
+        Relationships: [];
+      };
+      audit_logs: {
+        Row: {
+          id: string;
+          guild_id: string;
+          discord_id: string;
+          discord_username: string;
+          ip_address: string;
+          event_type: string;
+          status: string;
+          details: Json | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          guild_id: string;
+          discord_id: string;
+          discord_username: string;
+          ip_address: string;
+          event_type: string;
+          status: string;
+          details?: Json | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          guild_id?: string;
+          discord_id?: string;
+          discord_username?: string;
+          ip_address?: string;
+          event_type?: string;
+          status?: string;
+          details?: Json | null;
+          created_at?: string;
         };
         Relationships: [];
       };
@@ -127,3 +169,7 @@ export type IpLimitsUpdate = Database["public"]["Tables"]["ip_limits"]["Update"]
 export type GuildSettingsRow = Database["public"]["Tables"]["guild_settings"]["Row"];
 export type GuildSettingsInsert = Database["public"]["Tables"]["guild_settings"]["Insert"];
 export type GuildSettingsUpdate = Database["public"]["Tables"]["guild_settings"]["Update"];
+
+export type AuditLogRow = Database["public"]["Tables"]["audit_logs"]["Row"];
+export type AuditLogInsert = Database["public"]["Tables"]["audit_logs"]["Insert"];
+export type AuditLogUpdate = Database["public"]["Tables"]["audit_logs"]["Update"];

@@ -24,17 +24,17 @@ const IPV6_REGEX =
  *
  * @example
  *   normalizeIpv6("2001:0DB8:0000:0000:0000:0000:0000:0001") => "2001:db8::1"
- *   normalizeIpv6("::FFFF:192.168.1.1") => "::ffff:192.168.1.1"
+ *   normalizeIpv6("::ffff:192.0.2.1") => "192.0.2.1"
  */
 export function normalizeIpv6(raw: string): string {
   if (!raw || typeof raw !== "string") return raw;
 
   let ip = raw.trim().toLowerCase();
 
-  // Handle IPv4-mapped IPv6 (::ffff:x.x.x.x) — preserve the mapped form
-  const v4MappedMatch = ip.match(/^(::ffff:)(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i);
-  if (v4MappedMatch) {
-    return `::ffff:${v4MappedMatch[2]}`;
+  // Normalize IPv4-mapped IPv6 (::ffff:192.0.2.1) -> standard IPv4 (192.0.2.1)
+  const v4MappedMatch = ip.match(/^(?:(?:0*:){1,4}|::)ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i);
+  if (v4MappedMatch && IPV4_REGEX.test(v4MappedMatch[1])) {
+    return v4MappedMatch[1];
   }
 
   // Split on ::
@@ -132,6 +132,16 @@ export function sanitizeIp(ip: string): string {
   }
 
   return cleaned.trim();
+}
+
+/**
+ * Normalizes an IP address (IPv4, native IPv6, or IPv4-mapped IPv6):
+ * - IPv4-mapped IPv6 (::ffff:192.0.2.1) -> "192.0.2.1"
+ * - Native IPv6 (2001:0DB8::1) -> "2001:db8::1"
+ * - IPv4 -> standard IPv4
+ */
+export function normalizeIp(ip: string): string {
+  return sanitizeIp(ip);
 }
 
 /**

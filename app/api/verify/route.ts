@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getClientIp, isValidIp } from "@/lib/ip";
+import { getClientIp, isValidIp, normalizeIp } from "@/lib/ip";
 import { checkIpWithProxyCheck } from "@/lib/proxycheck";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { assignVerifiedRoles, getDiscordMember } from "@/lib/discord";
@@ -9,13 +9,41 @@ export const dynamic = "force-dynamic";
 
 interface VerificationRequestBody {
   discord_id?: string;
+  username?: string;
+  global_name?: string;
+  guild_id?: string;
 }
 
 /**
- * Resolves the guild ID from environment variables.
+ * Resolves the target Discord guild ID from request, database settings, or environment.
  */
-function getGuildId(): string {
-  return process.env.DISCORD_GUILD_ID || "";
+async function resolveGuildId(
+  requestedGuildId?: string | null
+): Promise<string> {
+  if (requestedGuildId && requestedGuildId.trim() !== "") {
+    return requestedGuildId.trim();
+  }
+
+  if (process.env.DISCORD_GUILD_ID && process.env.DISCORD_GUILD_ID.trim() !== "") {
+    return process.env.DISCORD_GUILD_ID.trim();
+  }
+
+  try {
+    const supabase = getSupabaseAdmin();
+    const { data } = await supabase
+      .from("guild_settings")
+      .select("guild_id")
+      .limit(1)
+      .maybeSingle();
+
+    if (data?.guild_id) {
+      return data.guild_id;
+    }
+  } catch (err) {
+    console.warn("[Verification] Could not query fallback guild_settings:", err);
+  }
+
+  return "";
 }
 
 /**
@@ -28,9 +56,10 @@ function buildAvatarUrl(discordId: string, avatar: string | null): string {
 }
 
 /**
- * Helper to fire an audit log for verification failures without blocking the response.
+ * Helper to fire an audit log for verification failures without blocking or interrupting the response.
  */
 async function logFailure(params: {
+  guildId: string;
   discordId: string;
   username: string;
   avatarUrl?: string | null;
@@ -40,12 +69,9 @@ async function logFailure(params: {
   linkedAltDiscordId?: string | null;
   linkedAltUsername?: string | null;
 }): Promise<void> {
-  const guildId = getGuildId();
-
   try {
-    await sendAuditLog({
+    await sendAuditLog(params.guildId, {
       type: "failure",
-      guildId: guildId || "",
       discordId: params.discordId,
       username: params.username,
       avatarUrl: params.avatarUrl,
@@ -64,16 +90,31 @@ async function logFailure(params: {
 export async function POST(req: NextRequest) {
   try {
     let discordId: string | null = null;
+    let requestedUsername: string | null = null;
+    let requestedGlobalName: string | null = null;
+    let requestedGuildId: string | null = null;
 
-    // 1. Parse Discord ID from body or query params
+    // 1. Parse payload from JSON body or URL search parameters
     const contentType = req.headers.get("content-type") || "";
     if (contentType.includes("application/json")) {
       const body = (await req.json().catch(() => ({}))) as VerificationRequestBody;
       discordId = body.discord_id || null;
+      requestedUsername = body.username || null;
+      requestedGlobalName = body.global_name || null;
+      requestedGuildId = body.guild_id || null;
     }
 
     if (!discordId) {
       discordId = req.nextUrl.searchParams.get("discord_id");
+    }
+    if (!requestedUsername) {
+      requestedUsername = req.nextUrl.searchParams.get("username");
+    }
+    if (!requestedGlobalName) {
+      requestedGlobalName = req.nextUrl.searchParams.get("global_name");
+    }
+    if (!requestedGuildId) {
+      requestedGuildId = req.nextUrl.searchParams.get("guild_id");
     }
 
     // Validate Discord snowflake ID format (17 to 20 digits)
@@ -91,9 +132,86 @@ export async function POST(req: NextRequest) {
 
     discordId = discordId.trim();
 
+    // 2. Resolve Guild ID and Dynamic Server Roles
+    const guildId = await resolveGuildId(requestedGuildId);
     const supabase = getSupabaseAdmin();
 
-    // 2. Already Verified Check: Block re-verification of existing Discord IDs early
+    let verifiedRoleId = process.env.DISCORD_VERIFIED_ROLE_ID || "";
+    let unverifiedRoleId = process.env.DISCORD_UNVERIFIED_ROLE_ID || "";
+
+    // Dynamically fetch configured role IDs from guild_settings table
+    if (guildId) {
+      try {
+        const { data: guildConfig, error: configError } = await supabase
+          .from("guild_settings")
+          .select("verified_role_id, unverified_role_id")
+          .eq("guild_id", guildId)
+          .maybeSingle();
+
+        if (configError) {
+          console.warn("[Verification] Could not fetch role configuration from guild_settings:", configError.message);
+        } else if (guildConfig) {
+          if (guildConfig.verified_role_id) {
+            verifiedRoleId = guildConfig.verified_role_id;
+          }
+          if (guildConfig.unverified_role_id) {
+            unverifiedRoleId = guildConfig.unverified_role_id;
+          }
+        }
+      } catch (err) {
+        console.warn("[Verification] Exception querying guild_settings for roles:", err);
+      }
+    }
+
+    // 3. Resolve Real Discord Username & Avatar early (Fixes placeholder User_5524 handles)
+    let discordUsername = requestedUsername || requestedGlobalName || "";
+    let avatarUrl: string | null = null;
+    let memberDetails = null;
+
+    if (process.env.DISCORD_BOT_TOKEN) {
+      // Look up guild member first if guild ID is known
+      if (guildId) {
+        const memberResult = await getDiscordMember(guildId, discordId);
+        if (memberResult.member) {
+          memberDetails = memberResult.member;
+          discordUsername =
+            memberDetails.user.discriminator && memberDetails.user.discriminator !== "0"
+              ? `${memberDetails.user.username}#${memberDetails.user.discriminator}`
+              : (memberDetails.user.global_name || memberDetails.user.username);
+          avatarUrl = buildAvatarUrl(discordId, memberDetails.user.avatar);
+        }
+      }
+
+      // If username not yet resolved from guild member, query Discord user API directly
+      if (!discordUsername) {
+        try {
+          const userRes = await fetch(`https://discord.com/api/v10/users/${discordId}`, {
+            headers: {
+              Authorization: `Bot ${process.env.DISCORD_BOT_TOKEN}`,
+            },
+          });
+          if (userRes.ok) {
+            const u = await userRes.json();
+            discordUsername =
+              u.discriminator && u.discriminator !== "0"
+                ? `${u.username}#${u.discriminator}`
+                : (u.global_name || u.username);
+            if (u.avatar && !avatarUrl) {
+              avatarUrl = buildAvatarUrl(discordId, u.avatar);
+            }
+          }
+        } catch (fetchErr) {
+          console.warn("[Discord API] Could not fetch user directly:", fetchErr);
+        }
+      }
+    }
+
+    // Fallback only if no username was resolved from OAuth, member, or user API
+    if (!discordUsername) {
+      discordUsername = `User_${discordId.slice(-4)}`;
+    }
+
+    // 4. Already Verified Check: Block re-verification of existing Discord IDs early
     const { data: existingVerification, error: existingVerificationError } = await supabase
       .from("verifications")
       .select("id, discord_id, discord_username, ip_address, verified_at")
@@ -109,7 +227,8 @@ export async function POST(req: NextRequest) {
         {
           success: false,
           code: "ALREADY_VERIFIED",
-          error: "You are already registered and verified! Your account has already been granted server access. If you are having role issues, please contact a server administrator.",
+          error:
+            "You are already registered and verified! Your account has already been granted server access. If you are having role issues, please contact a server administrator.",
           details: {
             discord_id: existingVerification.discord_id,
             discord_username: existingVerification.discord_username,
@@ -120,11 +239,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 3. Extract Client's Raw Plain-Text IP (No Hashing) — supports both IPv4 and IPv6
+    // 5. Extract Client IP and Normalize (dual-stack: native IPv6 intact, ::ffff: mapped IPv4 normalized)
     const rawIp = getClientIp(req);
-    const userIp = (isValidIp(rawIp) ? rawIp : "127.0.0.1").trim() || "127.0.0.1";
+    const userIp = normalizeIp(isValidIp(rawIp) ? rawIp : "127.0.0.1") || "127.0.0.1";
 
-    // 4. Blacklist Check: Query ip_blacklist table using raw plain-text userIp
+    // 6. Blacklist Check: Query ip_blacklist table using normalized plain-text userIp
     const { data: blacklisted, error: blacklistError } = await supabase
       .from("ip_blacklist")
       .select("id, ip_address, reason, created_at")
@@ -137,8 +256,10 @@ export async function POST(req: NextRequest) {
 
     if (blacklisted) {
       await logFailure({
+        guildId,
         discordId,
-        username: `User_${discordId.slice(-4)}`,
+        username: discordUsername,
+        avatarUrl,
         ipAddress: userIp,
         failureCode: "IP_BLACKLISTED",
         failureReason: `IP address \`${userIp}\` is blacklisted.${blacklisted.reason ? ` Reason: ${blacklisted.reason}` : ""}`,
@@ -161,12 +282,14 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 5. Proxy & VPN Detection via ProxyCheck.io
+    // 7. Proxy & VPN Detection via ProxyCheck.io
     const proxyCheck = await checkIpWithProxyCheck(userIp);
     if (!proxyCheck.isClean) {
       await logFailure({
+        guildId,
         discordId,
-        username: `User_${discordId.slice(-4)}`,
+        username: discordUsername,
+        avatarUrl,
         ipAddress: userIp,
         failureCode: "VPN_OR_PROXY_DETECTED",
         failureReason: `VPN/Proxy detected. Type: ${proxyCheck.type || "Unknown"}, Risk: ${proxyCheck.risk ?? "N/A"}, Provider: ${proxyCheck.provider || "Unknown"}`,
@@ -189,9 +312,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 6. Dynamic IP Account Limit Check
-    //    Count how many distinct Discord accounts are already verified under this IP.
-    //    Then check ip_limits for a custom limit; default is 1.
+    // 8. Dynamic IP Account Limit Check
     const [ipCountResult, ipLimitResult] = await Promise.all([
       supabase
         .from("verifications")
@@ -215,25 +336,22 @@ export async function POST(req: NextRequest) {
     const currentAccountCount = ipCountResult.count ?? (ipCountResult.data?.length ?? 0);
     const maxAccounts = ipLimitResult.data?.max_accounts ?? 1;
 
-    // Determine if the current discordId is already one of the registered accounts on this IP.
-    // (Since we already checked for the exact discord_id above and it wasn't there,
-    //  currentAccountCount only includes OTHER discord accounts from this IP.)
     const isIpAlreadyAtLimit = currentAccountCount >= maxAccounts;
 
     if (isIpAlreadyAtLimit) {
-      // Check if any of those existing records are for a *different* discord_id (anti-alt)
       const existingIpAccounts = ipCountResult.data ?? [];
       const allBelongToThisUser = existingIpAccounts.every(
         (record) => record.discord_id === discordId
       );
 
       if (!allBelongToThisUser) {
-        // Find the first alt account to report
         const altAccount = existingIpAccounts.find((r) => r.discord_id !== discordId);
 
         await logFailure({
+          guildId,
           discordId,
-          username: `User_${discordId.slice(-4)}`,
+          username: discordUsername,
+          avatarUrl,
           ipAddress: userIp,
           failureCode: "IP_LIMIT_REACHED",
           failureReason: `Exceeded IP limit (${currentAccountCount}/${maxAccounts} accounts). Detected alternative account.`,
@@ -257,9 +375,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 7. Anti-Alt Protection: Reject if this IP is tied to a different Discord user (legacy single-IP check)
-    //    This is superseded by the dynamic limit above when max_accounts=1, but kept as an
-    //    explicit guard to surface a clearer error message for the default 1-account-per-IP policy.
+    // 9. Legacy Single-IP Check (for default maxAccounts === 1 policy)
     const { data: singleIpRecord, error: singleIpError } = await supabase
       .from("verifications")
       .select("id, discord_id, discord_username, ip_address, verified_at")
@@ -282,8 +398,10 @@ export async function POST(req: NextRequest) {
 
     if (singleIpRecord && maxAccounts === 1) {
       await logFailure({
+        guildId,
         discordId,
-        username: `User_${discordId.slice(-4)}`,
+        username: discordUsername,
+        avatarUrl,
         ipAddress: userIp,
         failureCode: "IP_ALREADY_USED",
         failureReason: `IP already used by another account. Alt detection triggered.`,
@@ -309,59 +427,39 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 8. Fetch Discord Member Details & Guild Verification
-    const guildId = getGuildId();
-    const verifiedRoleId = process.env.DISCORD_VERIFIED_ROLE_ID;
-    const unverifiedRoleId = process.env.DISCORD_UNVERIFIED_ROLE_ID;
-
-    let memberDetails = null;
-    let discordUsername = `User_${discordId.slice(-4)}`;
-    let avatarUrl: string | null = null;
-
+    // 10. Verify Membership in Discord Server
     if (guildId && process.env.DISCORD_BOT_TOKEN) {
-      const memberResult = await getDiscordMember(guildId, discordId);
+      if (!memberDetails) {
+        const memberCheck = await getDiscordMember(guildId, discordId);
+        if (memberCheck.status === 404 || !memberCheck.member) {
+          await logFailure({
+            guildId,
+            discordId,
+            username: discordUsername,
+            avatarUrl,
+            ipAddress: userIp,
+            failureCode: "MEMBER_NOT_IN_GUILD",
+            failureReason: "User is not a member of the required Discord server.",
+          });
 
-      if (memberResult.status === 401) {
-        // Bot token is invalid — log a warning but don't block verification
-        // The admin must fix the bot token; verification still proceeds so users aren't locked out
-        console.error(
-          "[Discord API] Bot token is invalid (401 Unauthorized). Role assignment will be skipped. Please fix DISCORD_BOT_TOKEN."
-        );
-      } else if (memberResult.status === 404 || !memberResult.member) {
-        await logFailure({
-          discordId,
-          username: discordUsername,
-          ipAddress: userIp,
-          failureCode: "MEMBER_NOT_IN_GUILD",
-          failureReason: "User is not a member of the Discord server.",
-        });
-
-        return NextResponse.json(
-          {
-            success: false,
-            code: "MEMBER_NOT_IN_GUILD",
-            error:
-              "You are not a member of the required Discord server. Please join the Discord server before attempting verification.",
-          },
-          { status: 404 }
-        );
-      } else {
-        memberDetails = memberResult.member;
-      }
-
-      if (memberDetails) {
-        discordUsername =
-          memberDetails.user.discriminator && memberDetails.user.discriminator !== "0"
-            ? `${memberDetails.user.username}#${memberDetails.user.discriminator}`
-            : memberDetails.user.username;
-
-        avatarUrl = buildAvatarUrl(discordId, memberDetails.user.avatar);
+          return NextResponse.json(
+            {
+              success: false,
+              code: "MEMBER_NOT_IN_GUILD",
+              error:
+                "You are not a member of the required Discord server. Please join the Discord server before attempting verification.",
+            },
+            { status: 404 }
+          );
+        } else {
+          memberDetails = memberCheck.member;
+        }
       }
     }
 
     const verifiedAt = new Date();
 
-    // 9. Insert Verification Record into Supabase with Plain-Text IP & Rich Metadata
+    // 11. Insert Verification Record into Supabase with Real Username & Normalized IP
     const verificationPayload = {
       discord_id: discordId,
       discord_username: discordUsername,
@@ -388,8 +486,23 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 10. Assign Discord Roles via Discord REST API
-    if (guildId && verifiedRoleId && process.env.DISCORD_BOT_TOKEN) {
+    // 12. Assign Discord Roles via Discord REST API (PUT /guilds/{guild.id}/members/{user.id}/roles/{role.id})
+    if (guildId && verifiedRoleId) {
+      if (!process.env.DISCORD_BOT_TOKEN) {
+        console.error(
+          "[Verification] DISCORD_BOT_TOKEN is missing in API runtime environment. Role assignment cannot proceed."
+        );
+        return NextResponse.json(
+          {
+            success: false,
+            code: "BOT_TOKEN_MISSING",
+            error:
+              "Server configuration issue: DISCORD_BOT_TOKEN is not configured. Please contact an administrator.",
+          },
+          { status: 500 }
+        );
+      }
+
       const roleResult = await assignVerifiedRoles({
         guildId,
         discordId,
@@ -398,29 +511,37 @@ export async function POST(req: NextRequest) {
       });
 
       if (!roleResult.success) {
+        console.error(`[Verification] Role assignment failed for ${discordId}:`, roleResult.error);
         return NextResponse.json(
           {
             success: false,
             code: "ROLE_ASSIGNMENT_FAILED",
             error:
               roleResult.error ||
-              "Your identity was validated, but Discord role assignment failed. Please contact a server administrator.",
+              "Your identity was validated, but Discord role assignment failed. Ensure the bot's highest role is positioned ABOVE the verified role in Server Settings > Roles.",
           },
           { status: 502 }
         );
       }
+    } else {
+      console.warn(
+        `[Verification] Role assignment skipped: guildId='${guildId}', verifiedRoleId='${verifiedRoleId}'. Configure DISCORD_VERIFIED_ROLE_ID or use /role set in Discord.`
+      );
     }
 
-    // 11. Dispatch Audit Log — Success
-    await sendAuditLog({
-      type: "success",
-      guildId: guildId || "",
-      discordId,
-      username: discordUsername,
-      avatarUrl,
-      ipAddress: userIp,
-      verifiedAt,
-    });
+    // 13. Dispatch Audit Log — Success (non-blocking, wrapped in try/catch)
+    try {
+      await sendAuditLog(guildId, {
+        type: "success",
+        discordId,
+        username: discordUsername,
+        avatarUrl,
+        ipAddress: userIp,
+        verifiedAt,
+      });
+    } catch (auditErr) {
+      console.error("[Verification] Failed to dispatch success audit log:", auditErr);
+    }
 
     return NextResponse.json({
       success: true,

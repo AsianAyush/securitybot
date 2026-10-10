@@ -51,10 +51,12 @@ const supabase = createClient<Database>(SUPABASE_URL || "http://localhost:54321"
  */
 function extractErrorMessage(err: unknown): string {
   if (!err) return "Unknown error";
-  if (err instanceof Error) return err.message;
+  if (err instanceof Error) {
+    return err.message || JSON.stringify(err);
+  }
   if (typeof err === "object") {
     const obj = err as Record<string, unknown>;
-    if (typeof obj.message === "string" && obj.message) {
+    if (typeof obj.message === "string" && obj.message && obj.message !== "[object Object]") {
       return obj.message;
     }
     if (typeof obj.error === "string" && obj.error) {
@@ -64,12 +66,18 @@ function extractErrorMessage(err: unknown): string {
       return obj.details;
     }
     try {
-      return JSON.stringify(err);
+      const serialized = JSON.stringify(err);
+      if (serialized && serialized !== "{}") {
+        return serialized;
+      }
     } catch {
-      return String(err);
+      // Fallback
     }
   }
-  return String(err);
+  const str = String(err);
+  return str === "[object Object]"
+    ? "Database operation failed. Verify Supabase table permissions and connection."
+    : str;
 }
 
 if (!BOT_TOKEN) {
@@ -235,24 +243,58 @@ client.once("ready", async () => {
             .setDescription("Show the current audit log channel configuration")
         );
 
+      // /role command with subcommands: set, disable, status
+      const roleCommand = new SlashCommandBuilder()
+        .setName("role")
+        .setDescription("Configure verified and unverified roles for this server")
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addSubcommand(
+          new SlashCommandSubcommandBuilder()
+            .setName("set")
+            .setDescription("Set the verified role assigned upon successful verification")
+            .addRoleOption((option) =>
+              option
+                .setName("verified")
+                .setDescription("The role to grant upon successful verification")
+                .setRequired(true)
+            )
+            .addRoleOption((option) =>
+              option
+                .setName("unverified")
+                .setDescription("Optional role to remove upon successful verification")
+                .setRequired(false)
+            )
+        )
+        .addSubcommand(
+          new SlashCommandSubcommandBuilder()
+            .setName("disable")
+            .setDescription("Disable automatic verified role assignment")
+        )
+        .addSubcommand(
+          new SlashCommandSubcommandBuilder()
+            .setName("status")
+            .setDescription("Show current role configuration and verify role hierarchy")
+        );
+
       const commandsJson = [
         setupCommand.toJSON(),
         blockIpCommand.toJSON(),
         unblockIpCommand.toJSON(),
         limitCommand.toJSON(),
         logCommand.toJSON(),
+        roleCommand.toJSON(),
       ];
 
       if (GUILD_ID) {
         await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
           body: commandsJson,
         });
-        console.log(`✅ Registered guild slash commands (/setup-verify, /blockip, /unblockip, /limit, /log) for guild ${GUILD_ID}`);
+        console.log(`✅ Registered guild slash commands (/setup-verify, /blockip, /unblockip, /limit, /log, /role) for guild ${GUILD_ID}`);
       } else {
         await rest.put(Routes.applicationCommands(CLIENT_ID), {
           body: commandsJson,
         });
-        console.log(`✅ Registered global slash commands (/setup-verify, /blockip, /unblockip, /limit, /log)`);
+        console.log(`✅ Registered global slash commands (/setup-verify, /blockip, /unblockip, /limit, /log, /role)`);
       }
     } catch (err) {
       console.warn("⚠️ Warning: Failed to register slash commands:", err);
@@ -347,7 +389,7 @@ client.on("messageCreate", async (message: Message) => {
       await message.reply({ embeds: [embed] });
       console.log(`[Blacklist] Blocked IP ${targetIp.trim()} by ${message.author.tag}`);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = extractErrorMessage(err);
       console.error("[Blacklist] Error inserting into ip_blacklist:", msg);
       await message.reply(`❌ Database Error blacklisting IP: ${msg}`);
     }
@@ -402,7 +444,7 @@ client.on("messageCreate", async (message: Message) => {
         }
         targetIp = data.ip_address;
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = extractErrorMessage(err);
         await message.reply(`❌ Database error looking up user: ${msg}`);
         return;
       }
@@ -437,7 +479,7 @@ client.on("messageCreate", async (message: Message) => {
       await message.reply({ embeds: [embed] });
       console.log(`[Limit] !limit set ${targetIp} → max ${newMax} by ${message.author.tag}`);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = extractErrorMessage(err);
       await message.reply(`❌ Database error setting IP limit: ${msg}`);
     }
   }
@@ -485,9 +527,76 @@ client.on("messageCreate", async (message: Message) => {
       await message.reply({ embeds: [embed] });
       console.log(`[Blacklist] Unblocked IP ${targetIp.trim()} by ${message.author.tag}`);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = extractErrorMessage(err);
       console.error("[Blacklist] Error deleting from ip_blacklist:", msg);
       await message.reply(`❌ Database Error unblocking IP: ${msg}`);
+    }
+  }
+
+  // Command: !setrole <@role|role_id> or !role <@role|role_id>
+  if (command === "!setrole" || command === "!role") {
+    const member = message.member;
+    if (
+      !member ||
+      (!member.permissions.has(PermissionFlagsBits.Administrator) &&
+        !member.permissions.has(PermissionFlagsBits.ManageGuild))
+    ) {
+      await message.reply({
+        content: "❌ You need Administrator or Manage Server permissions to use this command.",
+      });
+      return;
+    }
+
+    const roleArg = args[1];
+    if (!roleArg) {
+      await message.reply("❌ Usage: `!setrole <@role | role_id>`");
+      return;
+    }
+
+    const roleMentionMatch = roleArg.match(/^<@&?(\d{17,20})>$/);
+    const targetRoleId = roleMentionMatch ? roleMentionMatch[1] : roleArg.trim();
+
+    const targetRole = message.guild.roles.cache.get(targetRoleId);
+    if (!targetRole) {
+      await message.reply(`❌ Role \`${targetRoleId}\` not found in this server.`);
+      return;
+    }
+
+    const botMember = await message.guild.members.fetchMe();
+    let hierarchyWarning = "";
+    if (botMember && botMember.roles.highest.position <= targetRole.position) {
+      hierarchyWarning = `\n\n⚠️ **Role Hierarchy Alert:**\nThe bot's highest role is positioned below or equal to **@${targetRole.name}**. In Server Settings > Roles, move the bot's role ABOVE this role so it can assign it!`;
+    }
+
+    try {
+      const now = new Date().toISOString();
+      const { error } = await supabase.from("guild_settings").upsert(
+        {
+          guild_id: message.guild.id,
+          verified_role_id: targetRole.id,
+          updated_at: now,
+        },
+        { onConflict: "guild_id" }
+      );
+
+      if (error) throw error;
+
+      const embed = new EmbedBuilder()
+        .setColor(0x10b981)
+        .setTitle("🛡️ Verified Role Configured")
+        .setDescription(
+          `Members completing verification will now receive **${targetRole.name}** (<@&${targetRole.id}>).${hierarchyWarning}`
+        )
+        .addFields(
+          { name: "Role", value: `<@&${targetRole.id}> (\`${targetRole.id}\`)`, inline: true },
+          { name: "Set By", value: `<@${message.author.id}>`, inline: true }
+        )
+        .setTimestamp();
+
+      await message.reply({ embeds: [embed] });
+    } catch (err: unknown) {
+      const msg = extractErrorMessage(err);
+      await message.reply(`❌ Database error setting verified role: ${msg}`);
     }
   }
 });
@@ -751,16 +860,44 @@ client.on("interactionCreate", async (interaction) => {
         await cmdInteraction.deferReply({ ephemeral: true });
 
         try {
+          const now = new Date().toISOString();
           const { error } = await supabase.from("guild_settings").upsert(
             {
               guild_id: guildId,
               log_channel_id: channel.id,
-              updated_at: new Date().toISOString(),
+              updated_at: now,
             },
             { onConflict: "guild_id" }
           );
 
-          if (error) throw error;
+          if (error) {
+            // Clean fallback: check if row exists and update or insert
+            const { data: existing } = await supabase
+              .from("guild_settings")
+              .select("guild_id")
+              .eq("guild_id", guildId)
+              .maybeSingle();
+
+            if (existing) {
+              const { error: updateError } = await supabase
+                .from("guild_settings")
+                .update({
+                  log_channel_id: channel.id,
+                  updated_at: now,
+                })
+                .eq("guild_id", guildId);
+              if (updateError) throw updateError;
+            } else {
+              const { error: insertError } = await supabase
+                .from("guild_settings")
+                .insert({
+                  guild_id: guildId,
+                  log_channel_id: channel.id,
+                  updated_at: now,
+                });
+              if (insertError) throw insertError;
+            }
+          }
 
           const embed = new EmbedBuilder()
             .setColor(0x10b981) // Emerald
@@ -779,7 +916,7 @@ client.on("interactionCreate", async (interaction) => {
           await cmdInteraction.editReply({ embeds: [embed] });
           console.log(`[Log] /log set channel #${channel.name || channel.id} in guild ${guildId} by ${cmdInteraction.user.tag}`);
         } catch (err: unknown) {
-          const msg = extractErrorMessage(err);
+          const msg = (err as any)?.message || JSON.stringify(err);
           console.error(`[Log] /log set database error in guild ${guildId}:`, msg, err);
           await cmdInteraction.editReply(`❌ Database error saving log channel: ${msg}`);
         }
@@ -817,7 +954,7 @@ client.on("interactionCreate", async (interaction) => {
           await cmdInteraction.editReply({ embeds: [embed] });
           console.log(`[Log] /log disable in guild ${guildId} by ${cmdInteraction.user.tag}`);
         } catch (err: unknown) {
-          const msg = extractErrorMessage(err);
+          const msg = (err as any)?.message || JSON.stringify(err);
           console.error(`[Log] /log disable database error in guild ${guildId}:`, msg, err);
           await cmdInteraction.editReply(`❌ Database error disabling log channel: ${msg}`);
         }
@@ -871,9 +1008,217 @@ client.on("interactionCreate", async (interaction) => {
 
           await cmdInteraction.editReply({ embeds: [embed] });
         } catch (err: unknown) {
-          const msg = extractErrorMessage(err);
+          const msg = (err as any)?.message || JSON.stringify(err);
           console.error(`[Log] /log status database error in guild ${guildId}:`, msg, err);
           await cmdInteraction.editReply(`❌ Database error fetching log status: ${msg}`);
+        }
+        return;
+      }
+    }
+
+    // /role set | /role disable | /role status
+    if (cmdInteraction.commandName === "role") {
+      if (!cmdInteraction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+        await cmdInteraction.reply({
+          content: "❌ You need Administrator permissions to use this command.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const guildId = cmdInteraction.guildId;
+      if (!guildId) {
+        await cmdInteraction.reply({
+          content: "❌ This command can only be used inside a server.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const subcommand = cmdInteraction.options.getSubcommand(true);
+
+      // /role set
+      if (subcommand === "set") {
+        const verifiedRole = cmdInteraction.options.getRole("verified", true);
+        const unverifiedRole = cmdInteraction.options.getRole("unverified");
+
+        await cmdInteraction.deferReply({ ephemeral: true });
+
+        try {
+          const now = new Date().toISOString();
+
+          // Check Role Hierarchy: Bot's highest role must be ABOVE the verified role
+          const botMember = await cmdInteraction.guild?.members.fetchMe();
+          let hierarchyWarning = "";
+          if (botMember && botMember.roles.highest.position <= verifiedRole.position) {
+            hierarchyWarning = `\n\n⚠️ **Role Hierarchy Warning:**\nThe bot's highest role is positioned below or equal to <@&${verifiedRole.id}>. In Discord Server Settings > Roles, you MUST drag the bot's role ABOVE <@&${verifiedRole.id}> so the bot has permission to assign it!`;
+          }
+
+          const { error } = await supabase.from("guild_settings").upsert(
+            {
+              guild_id: guildId,
+              verified_role_id: verifiedRole.id,
+              unverified_role_id: unverifiedRole?.id ?? null,
+              updated_at: now,
+            },
+            { onConflict: "guild_id" }
+          );
+
+          if (error) {
+            const { data: existing } = await supabase
+              .from("guild_settings")
+              .select("guild_id")
+              .eq("guild_id", guildId)
+              .maybeSingle();
+
+            if (existing) {
+              const { error: updateError } = await supabase
+                .from("guild_settings")
+                .update({
+                  verified_role_id: verifiedRole.id,
+                  unverified_role_id: unverifiedRole?.id ?? null,
+                  updated_at: now,
+                })
+                .eq("guild_id", guildId);
+              if (updateError) throw updateError;
+            } else {
+              const { error: insertError } = await supabase
+                .from("guild_settings")
+                .insert({
+                  guild_id: guildId,
+                  verified_role_id: verifiedRole.id,
+                  unverified_role_id: unverifiedRole?.id ?? null,
+                  updated_at: now,
+                });
+              if (insertError) throw insertError;
+            }
+          }
+
+          const embed = new EmbedBuilder()
+            .setColor(0x10b981) // Emerald
+            .setTitle("🛡️ Verified Role Configured")
+            .setDescription(
+              `Members completing verification will now automatically receive <@&${verifiedRole.id}>.${hierarchyWarning}`
+            )
+            .addFields(
+              { name: "Verified Role", value: `<@&${verifiedRole.id}> (\`${verifiedRole.id}\`)`, inline: true },
+              ...(unverifiedRole
+                ? [
+                    {
+                      name: "Unverified Role to Remove",
+                      value: `<@&${unverifiedRole.id}> (\`${unverifiedRole.id}\`)`,
+                      inline: true,
+                    },
+                  ]
+                : []),
+              { name: "Configured By", value: `<@${cmdInteraction.user.id}>`, inline: true }
+            )
+            .setTimestamp();
+
+          await cmdInteraction.editReply({ embeds: [embed] });
+        } catch (err: unknown) {
+          const msg = (err as any)?.message || JSON.stringify(err);
+          console.error(`[Role] /role set database error in guild ${guildId}:`, msg, err);
+          await cmdInteraction.editReply(`❌ Database error saving role: ${msg}`);
+        }
+        return;
+      }
+
+      // /role disable
+      if (subcommand === "disable") {
+        await cmdInteraction.deferReply({ ephemeral: true });
+
+        try {
+          const now = new Date().toISOString();
+          const { error } = await supabase.from("guild_settings").upsert(
+            {
+              guild_id: guildId,
+              verified_role_id: null,
+              unverified_role_id: null,
+              updated_at: now,
+            },
+            { onConflict: "guild_id" }
+          );
+
+          if (error) throw error;
+
+          const embed = new EmbedBuilder()
+            .setColor(0xfbbf24) // Amber
+            .setTitle("🛡️ Automatic Role Assignment Disabled")
+            .setDescription(
+              "Automatic Discord role assignment has been disabled for this server."
+            )
+            .addFields({ name: "Disabled By", value: `<@${cmdInteraction.user.id}>`, inline: true })
+            .setFooter({ text: "Use /role set to re-enable at any time." })
+            .setTimestamp();
+
+          await cmdInteraction.editReply({ embeds: [embed] });
+        } catch (err: unknown) {
+          const msg = (err as any)?.message || JSON.stringify(err);
+          console.error(`[Role] /role disable error in guild ${guildId}:`, msg, err);
+          await cmdInteraction.editReply(`❌ Database error disabling role assignment: ${msg}`);
+        }
+        return;
+      }
+
+      // /role status
+      if (subcommand === "status") {
+        await cmdInteraction.deferReply({ ephemeral: true });
+
+        try {
+          const { data, error } = await supabase
+            .from("guild_settings")
+            .select("verified_role_id, unverified_role_id, updated_at")
+            .eq("guild_id", guildId)
+            .maybeSingle();
+
+          if (error) throw error;
+
+          const verifiedRoleId = data?.verified_role_id || process.env.DISCORD_VERIFIED_ROLE_ID || null;
+          const unverifiedRoleId = data?.unverified_role_id || process.env.DISCORD_UNVERIFIED_ROLE_ID || null;
+
+          // Check bot hierarchy
+          let hierarchyStatus = "✅ Proper permissions";
+          if (verifiedRoleId && cmdInteraction.guild) {
+            const botMember = await cmdInteraction.guild.members.fetchMe();
+            const targetRole = cmdInteraction.guild.roles.cache.get(verifiedRoleId);
+            if (targetRole && botMember && botMember.roles.highest.position <= targetRole.position) {
+              hierarchyStatus = "⚠️ Bot role position too low! Move bot role above verified role in server settings.";
+            }
+          }
+
+          const embed = new EmbedBuilder()
+            .setColor(verifiedRoleId ? 0x10b981 : 0x6b7280)
+            .setTitle("🛡️ Role Assignment Status")
+            .setDescription(
+              verifiedRoleId
+                ? `Verified role is set to <@&${verifiedRoleId}>.`
+                : "Automatic role assignment is currently **disabled** or not configured."
+            )
+            .addFields(
+              {
+                name: "Verified Role",
+                value: verifiedRoleId ? `<@&${verifiedRoleId}> (\`${verifiedRoleId}\`)` : "None",
+                inline: true,
+              },
+              {
+                name: "Unverified Role to Remove",
+                value: unverifiedRoleId ? `<@&${unverifiedRoleId}> (\`${unverifiedRoleId}\`)` : "None",
+                inline: true,
+              },
+              {
+                name: "Role Hierarchy Check",
+                value: hierarchyStatus,
+                inline: false,
+              }
+            )
+            .setTimestamp();
+
+          await cmdInteraction.editReply({ embeds: [embed] });
+        } catch (err: unknown) {
+          const msg = (err as any)?.message || JSON.stringify(err);
+          console.error(`[Role] /role status error in guild ${guildId}:`, msg, err);
+          await cmdInteraction.editReply(`❌ Database error checking role status: ${msg}`);
         }
         return;
       }

@@ -22,17 +22,21 @@ const DISCORD_API_BASE = "https://discord.com/api/v10";
 /**
  * Gets Discord API Bot authorization header
  */
-function getAuthHeader(): { Authorization: string; "Content-Type": string } {
+function getAuthHeader(auditReason?: string): { Authorization: string; "Content-Type": string; "X-Audit-Log-Reason"?: string } {
   const botToken = process.env.DISCORD_BOT_TOKEN;
   if (!botToken) {
     throw new Error(
       "DISCORD_BOT_TOKEN is not configured in environment variables."
     );
   }
-  return {
+  const headers: { Authorization: string; "Content-Type": string; "X-Audit-Log-Reason"?: string } = {
     Authorization: `Bot ${botToken}`,
     "Content-Type": "application/json",
   };
+  if (auditReason) {
+    headers["X-Audit-Log-Reason"] = encodeURIComponent(auditReason);
+  }
+  return headers;
 }
 
 /**
@@ -87,7 +91,7 @@ export async function getDiscordMember(
     }
 
     if (!res.ok) {
-      const errText = await res.text();
+      const errText = await res.text().catch(() => "");
       console.error(`[Discord API] Error ${res.status} fetching member:`, errText);
       return { member: null, status: res.status, error: `Discord API error HTTP ${res.status}` };
     }
@@ -101,6 +105,58 @@ export async function getDiscordMember(
 }
 
 /**
+ * Checks if the bot has high enough role hierarchy to assign a target role.
+ */
+export async function checkRoleHierarchy(
+  guildId: string,
+  targetRoleId: string
+): Promise<{ canManage: boolean; reason?: string }> {
+  try {
+    const botToken = process.env.DISCORD_BOT_TOKEN;
+    if (!botToken) return { canManage: false, reason: "DISCORD_BOT_TOKEN not configured" };
+
+    const headers = getAuthHeader();
+    // 1. Fetch guild roles
+    const rolesRes = await fetch(`${DISCORD_API_BASE}/guilds/${guildId}/roles`, { headers });
+    if (!rolesRes.ok) return { canManage: true }; // Proceed optimistically if cannot query
+    const roles: Array<{ id: string; name: string; position: number }> = await rolesRes.json();
+    const targetRole = roles.find((r) => r.id === targetRoleId);
+    if (!targetRole) {
+      return { canManage: false, reason: `Target role ${targetRoleId} does not exist in this guild.` };
+    }
+
+    // 2. Fetch bot user
+    const meRes = await fetch(`${DISCORD_API_BASE}/users/@me`, { headers });
+    if (!meRes.ok) return { canManage: true };
+    const me = await meRes.json();
+
+    // 3. Fetch bot member in guild
+    const botMemberRes = await fetch(`${DISCORD_API_BASE}/guilds/${guildId}/members/${me.id}`, { headers });
+    if (!botMemberRes.ok) return { canManage: true };
+    const botMember = await botMemberRes.json();
+
+    let botHighestPosition = -1;
+    for (const rId of botMember.roles || []) {
+      const r = roles.find((role) => role.id === rId);
+      if (r && r.position > botHighestPosition) {
+        botHighestPosition = r.position;
+      }
+    }
+
+    if (botHighestPosition <= targetRole.position) {
+      return {
+        canManage: false,
+        reason: `Role Hierarchy Violation: Bot's highest role is at position ${botHighestPosition}, but target role '${targetRole.name}' is at position ${targetRole.position}. The bot's role must be positioned ABOVE '${targetRole.name}' in Discord Server Settings > Roles.`,
+      };
+    }
+
+    return { canManage: true };
+  } catch {
+    return { canManage: true };
+  }
+}
+
+/**
  * Assigns verified role and removes unverified role from a member via Discord REST API.
  */
 export async function assignVerifiedRoles(params: {
@@ -110,18 +166,28 @@ export async function assignVerifiedRoles(params: {
   unverifiedRoleId?: string;
 }): Promise<{ success: boolean; error?: string }> {
   const { guildId, discordId, verifiedRoleId, unverifiedRoleId } = params;
-  const headers = getAuthHeader();
 
-  // 1. Add Verified Role
+  if (!process.env.DISCORD_BOT_TOKEN) {
+    const errorMsg =
+      "DISCORD_BOT_TOKEN is not configured in the runtime environment. Cannot assign Discord roles.";
+    console.error(`[Discord API] ${errorMsg}`);
+    return { success: false, error: errorMsg };
+  }
+
+  if (!verifiedRoleId || verifiedRoleId.trim() === "") {
+    return { success: false, error: "No verified role ID configured." };
+  }
+
+  // 1. Add Verified Role via PUT /guilds/{guild.id}/members/{user.id}/roles/{role.id}
   try {
     const addRoleUrl = `${DISCORD_API_BASE}/guilds/${guildId}/members/${discordId}/roles/${verifiedRoleId}`;
     const addRoleRes = await fetch(addRoleUrl, {
       method: "PUT",
-      headers,
+      headers: getAuthHeader("SecuritySTEX Verification Completed"),
     });
 
-    if (!addRoleRes.ok) {
-      const errorBody = await addRoleRes.text();
+    if (!addRoleRes.ok && addRoleRes.status !== 204) {
+      const errorBody = await addRoleRes.text().catch(() => "");
       console.error(
         `[Discord API] Failed to add verified role ${verifiedRoleId} to ${discordId}: HTTP ${addRoleRes.status}`,
         errorBody
@@ -131,13 +197,13 @@ export async function assignVerifiedRoles(params: {
         return {
           success: false,
           error:
-            "Bot has insufficient permissions to assign roles. Please check that the bot's role is positioned ABOVE the verified role in Discord Server Settings > Roles.",
+            "Discord Role Hierarchy Error: Bot has insufficient permissions (403 Forbidden). Ensure the bot has 'Manage Roles' permission and its highest role is positioned ABOVE the 'Verified' role in Discord Server Settings > Roles.",
         };
       } else if (addRoleRes.status === 404) {
         return {
           success: false,
           error:
-            "Member not found in Discord server. Please join the Discord server first before verifying.",
+            "Member or role not found in Discord server. Please verify you are in the server and the configured role exists.",
         };
       }
 
@@ -160,16 +226,15 @@ export async function assignVerifiedRoles(params: {
       const removeRoleUrl = `${DISCORD_API_BASE}/guilds/${guildId}/members/${discordId}/roles/${unverifiedRoleId}`;
       const removeRoleRes = await fetch(removeRoleUrl, {
         method: "DELETE",
-        headers,
+        headers: getAuthHeader("SecuritySTEX Verification Completed - Removing Unverified Role"),
       });
 
-      if (!removeRoleRes.ok && removeRoleRes.status !== 404) {
-        const errorBody = await removeRoleRes.text();
+      if (!removeRoleRes.ok && removeRoleRes.status !== 204 && removeRoleRes.status !== 404) {
+        const errorBody = await removeRoleRes.text().catch(() => "");
         console.warn(
           `[Discord API] Note: Failed to remove unverified role ${unverifiedRoleId} (HTTP ${removeRoleRes.status}):`,
           errorBody
         );
-        // Non-blocking warning: verified role has already been assigned
       }
     } catch (err) {
       console.warn("[Discord API] Warning removing unverified role:", err);

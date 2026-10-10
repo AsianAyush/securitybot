@@ -36,3 +36,26 @@ export function getSupabaseAdmin() {
 }
 
 export type SupabaseAdminClient = ReturnType<typeof getSupabaseAdmin>;
+
+/**
+ * SQL migration helper for IPv6 storage schema alteration:
+ * Ensures all ip_address columns support arbitrary length IPv6 addresses (up to 45 chars).
+ */
+export const IPV6_MIGRATION_SQL = `
+-- ==============================================================================
+-- SecuritySTEX IPv6 Schema Migration Helper
+-- Run this in your Supabase SQL Editor if IPv6 addresses fail to store:
+-- ==============================================================================
+ALTER TABLE public.verifications ALTER COLUMN ip_address TYPE TEXT;
+ALTER TABLE public.ip_limits ALTER COLUMN ip_address TYPE TEXT;
+ALTER TABLE public.ip_blacklist ALTER COLUMN ip_address TYPE TEXT;
+ALTER TABLE public.guild_settings ADD COLUMN IF NOT EXISTS verified_role_id TEXT;
+ALTER TABLE public.guild_settings ADD COLUMN IF NOT EXISTS unverified_role_id TEXT;
+`;
+
+/**
+ * Logs the SQL schema alteration snippet to console if needed during troubleshooting.
+ */
+export function logIpv6MigrationSnippet() {
+  console.info("[SecuritySTEX IPv6 Migration Snippet]\n" + IPV6_MIGRATION_SQL);
+}

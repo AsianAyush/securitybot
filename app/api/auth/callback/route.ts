@@ -45,8 +45,20 @@ export async function GET(req: NextRequest) {
       throw new Error("Unable to retrieve Discord user profile from access token.");
     }
 
-    // 3. Redirect user to the verification page with their Discord ID
-    return NextResponse.redirect(`${origin}/verify?discord_id=${encodeURIComponent(user.id)}`);
+    // 3. Extract real username and redirect user to the verification gateway
+    const params = new URLSearchParams({
+      discord_id: user.id,
+      username: user.username,
+    });
+
+    if (user.global_name) {
+      params.set("global_name", user.global_name);
+    }
+    if (user.discriminator && user.discriminator !== "0") {
+      params.set("discriminator", user.discriminator);
+    }
+
+    return NextResponse.redirect(`${origin}/verify?${params.toString()}`);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[OAuth Callback] Error during token exchange or user lookup:", message);

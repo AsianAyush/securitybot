@@ -97,7 +97,12 @@ function VerifyContent() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ discord_id: discordId }),
+        body: JSON.stringify({
+          discord_id: discordId,
+          username: member?.username || searchParams.get("username") || undefined,
+          global_name: member?.global_name || searchParams.get("global_name") || undefined,
+          guild_id: guild?.id || searchParams.get("guild_id") || undefined,
+        }),
       });
 
       const data = await response.json();
